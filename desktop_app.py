@@ -583,7 +583,7 @@ class WebStyleApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("OTP24HR by STWIN")
+        self.title(f"OTP24HR by STWIN — v{APP_VERSION}")
         try:
             self.iconbitmap(resource_path("1.ico"))
         except tk.TclError:
@@ -636,8 +636,12 @@ class WebStyleApp(tk.Tk):
         card = tk.Frame(self, bg="#100b20", padx=24, pady=14, highlightthickness=1,
                         highlightbackground="#6d28d9")
         card.pack(fill="both", expand=True, padx=24, pady=14)
-        tk.Label(card, text="OTP24HR", bg="#ffffff", fg="#13231a",
-                 font=("Segoe UI", 21, "bold")).pack(anchor="w")
+        title_row = tk.Frame(card, bg="#ffffff")
+        title_row.pack(fill="x")
+        tk.Label(title_row, text="OTP24HR", bg="#ffffff", fg="#13231a",
+                 font=("Segoe UI", 21, "bold")).pack(side="left")
+        tk.Label(title_row, text=f"v{APP_VERSION}", bg="#20143d", fg="#d8b4fe",
+                 font=("Segoe UI", 9, "bold"), padx=10, pady=4).pack(side="right", pady=(3, 0))
         tk.Label(card, text="บริการ OTP ประเทศไทย • by STWIN", bg="#ffffff", fg="#617067",
                  font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 18))
 
