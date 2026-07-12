@@ -1225,6 +1225,10 @@ class WebStyleApp(tk.Tk):
             self.polling_ids.discard(aid)
             if aid not in self.orders: continue
             if error:
+                if "ยกเลิก" in error:
+                    self.orders.pop(aid, None)
+                    if self.table.exists(aid): self.table.delete(aid)
+                    continue
                 self.orders[aid]["status"] = f"ตรวจไม่สำเร็จ: {error}"
                 self._sync_row(aid)
                 continue
@@ -1368,22 +1372,23 @@ class WebStyleApp(tk.Tk):
     def _themed_days_dialog(self):
         result = {"value": None}; window = tk.Toplevel(self); window.title("กำหนดจำนวนวัน")
         window.configure(bg="#070510"); window.resizable(False, False); window.transient(self); window.grab_set()
-        width, height = 400, 240
+        width, height = 400, 300
         window.geometry(f"{width}x{height}+{self.winfo_x()+(self.winfo_width()-width)//2}+{self.winfo_y()+(self.winfo_height()-height)//2}")
         panel = tk.Frame(window, bg="#100b20", padx=25, pady=22, highlightthickness=1, highlightbackground="#7c3aed")
         panel.pack(fill="both", expand=True, padx=14, pady=14)
+        buttons = tk.Frame(panel, bg="#100b20", height=42); buttons.pack(fill="x", side="bottom", pady=(12, 0))
+        buttons.pack_propagate(False)
         tk.Label(panel, text="รายงานติดลิมิต", bg="#100b20", fg="#f5f3ff", font=("Segoe UI", 15, "bold")).pack(anchor="w")
         tk.Label(panel, text="ติดลิมิตกี่วัน? (1–365)", bg="#100b20", fg="#cfc3e6", font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 5))
         value = tk.StringVar(); entry = ttk.Entry(panel, textvariable=value, font=("Segoe UI", 11)); entry.pack(fill="x", ipady=4)
         status = tk.Label(panel, text="", bg="#100b20", fg="#ff7b7b", font=("Segoe UI", 9)); status.pack(anchor="w")
-        buttons = tk.Frame(panel, bg="#100b20"); buttons.pack(fill="x", side="bottom")
         def submit():
             try: days = int(value.get())
             except ValueError: days = 0
             if not 1 <= days <= 365: status.configure(text="กรุณากรอกตัวเลข 1–365"); return
             result["value"] = days; window.destroy()
-        ttk.Button(buttons, text="ยกเลิก", command=window.destroy).pack(side="right")
-        ttk.Button(buttons, text="ตกลง", command=submit, style="Green.TButton").pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="ยกเลิก", command=window.destroy).pack(side="right", fill="y")
+        ttk.Button(buttons, text="ตกลง", command=submit, style="Green.TButton").pack(side="right", fill="y", padx=(0, 8))
         entry.bind("<Return>", lambda _e: submit()); entry.focus_set(); self.wait_window(window)
         return result["value"]
 
@@ -1406,8 +1411,12 @@ class WebStyleApp(tk.Tk):
             loaded = payload.get("orders", {})
             if not isinstance(loaded, dict):
                 return
+            cleaned = False
             for aid, order in loaded.items():
                 if not isinstance(order, dict) or not order.get("phone"):
+                    continue
+                if "ยกเลิก" in str(order.get("status", "")):
+                    cleaned = True
                     continue
                 order.setdefault("price", 0.0); order.setdefault("code", "—")
                 order.setdefault("cloud_recorded", False)
@@ -1420,6 +1429,7 @@ class WebStyleApp(tk.Tk):
             if self.orders:
                 last = next(reversed(self.orders)); self.table.selection_set(last)
             if any(order["active"] for order in self.orders.values()): self._start_timers()
+            if cleaned: self._save_orders()
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return
 
