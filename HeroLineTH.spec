@@ -1,10 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+import sys
+
+
+vc_runtime = []
+for dll_name in ("vcruntime140.dll", "vcruntime140_1.dll"):
+    dll_path = os.path.join(sys.base_prefix, dll_name)
+    if os.path.exists(dll_path):
+        vc_runtime.append((dll_path, "."))
+
 
 a = Analysis(
     ['desktop_app.py'],
     pathex=[],
-    binaries=[],
+    binaries=vc_runtime,
     datas=[('1.ico', '.'), ('cloud_config.json', '.')],
     hiddenimports=[],
     hookspath=[],
