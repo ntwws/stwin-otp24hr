@@ -698,12 +698,17 @@ class WebStyleApp(tk.Tk):
         tk.Frame(card, bg="#294866", height=1).pack(fill="x", pady=(0, 7))
         tk.Label(card, text="รายการหมายเลข / OTP", bg="#ffffff", fg="#13231a",
                  font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 7))
-        self.table = ttk.Treeview(card, columns=("number", "cost", "time", "status", "code"),
+        table_frame = tk.Frame(card, bg="#100b20")
+        table_frame.pack(fill="x")
+        self.table = ttk.Treeview(table_frame, columns=("number", "cost", "time", "status", "code"),
                                   show="headings", height=5, selectmode="browse")
+        table_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
+        self.table.configure(yscrollcommand=table_scroll.set)
         for col, title, width in (("number", "หมายเลข", 160), ("cost", "ราคา", 90),
                                   ("time", "เวลา", 65), ("status", "สถานะ", 150), ("code", "OTP", 115)):
             self.table.heading(col, text=title); self.table.column(col, width=width, anchor="center")
-        self.table.pack(fill="x")
+        self.table.pack(side="left", fill="x", expand=True)
+        table_scroll.pack(side="right", fill="y")
         self.table.bind("<Button-3>", self._show_order_menu)
         order_actions = tk.Frame(card, bg="#ffffff")
         order_actions.pack(fill="x", pady=(10, 0))
@@ -1239,13 +1244,8 @@ class WebStyleApp(tk.Tk):
             state, _, value = str(raw).partition(":")
             if state == "STATUS_OK":
                 self.orders[aid].update(status="ได้รับ OTP แล้ว", code=value, active=False)
-                if self.table.exists(aid):
-                    self.table.delete(aid)
                 if self.cloud and not self.orders[aid].get("cloud_recorded"):
                     self._record_cloud_success(aid)
-                else:
-                    self.orders.pop(aid, None)
-                continue
             else:
                 self.orders[aid]["status"] = ERRORS.get(state, str(raw))
                 if state == "STATUS_CANCEL":
@@ -1275,8 +1275,6 @@ class WebStyleApp(tk.Tk):
         if not self.orders[aid].get("cloud_recorded"):
             self.orders[aid]["cloud_recorded"] = True
             self.monthly_success += 1
-        if "ได้รับ OTP" in str(self.orders[aid].get("status", "")):
-            self.orders.pop(aid, None)
         self._save_orders()
 
     def command_selected(self, name):
@@ -1437,16 +1435,11 @@ class WebStyleApp(tk.Tk):
                 if "เสร็จสิ้น" in status:
                     cleaned = True
                     continue
-                if "ได้รับ OTP" in status:
-                    if order.get("cloud_recorded") or not self.cloud:
-                        cleaned = True
-                        continue
-                    self.orders[str(aid)] = order
-                    pending_success.append(str(aid))
-                    continue
                 order.setdefault("price", 0.0); order.setdefault("code", "—")
                 order.setdefault("cloud_recorded", False)
                 order.setdefault("status", "ไม่ทราบสถานะ"); order.setdefault("active", False)
+                if "ได้รับ OTP" in status and self.cloud and not order.get("cloud_recorded"):
+                    pending_success.append(str(aid))
                 order["remaining"] = max(0, int(order.get("remaining", 0)) - (elapsed if order["active"] else 0))
                 if order["active"] and order["remaining"] == 0:
                     order["active"] = False; order["status"] = "หมดเวลา"
