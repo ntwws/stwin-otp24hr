@@ -795,10 +795,10 @@ class WebStyleApp(tk.Tk):
             if not silent:
                 self.notice_var.set(f"โปรแกรมเป็นเวอร์ชันล่าสุดแล้ว (v{APP_VERSION})")
             return
-        notes = str(manifest.get("notes", "")).strip()
-        message = f"พบเวอร์ชันใหม่ v{manifest['version']}\nเวอร์ชันปัจจุบัน v{APP_VERSION}"
-        if notes: message += f"\n\n{notes[:220]}"
-        if self._themed_confirm("มีอัปเดตใหม่", message + "\n\nดาวน์โหลดตอนนี้หรือไม่?"):
+        message = (f"เวอร์ชันปัจจุบัน   v{APP_VERSION}\n"
+                   f"เวอร์ชันใหม่       v{manifest['version']}\n\n"
+                   "พร้อมดาวน์โหลดและติดตั้งอัตโนมัติ")
+        if self._themed_confirm("มีอัปเดตใหม่", message + "\n\nต้องการอัปเดตตอนนี้หรือไม่?"):
             self.notice_var.set("กำลังดาวน์โหลดอัปเดต…")
             self._run(lambda: (manifest, self.update_manager.download_verified(manifest)), self._update_downloaded)
 
@@ -1369,16 +1369,18 @@ class WebStyleApp(tk.Tk):
     def _themed_confirm(self, title, message):
         result = {"value": False}; window = tk.Toplevel(self); window.title(title)
         window.configure(bg="#070510"); window.resizable(False, False); window.transient(self); window.grab_set()
-        width, height = 410, 220
+        width, height = 460, 300
         window.geometry(f"{width}x{height}+{self.winfo_x()+(self.winfo_width()-width)//2}+{self.winfo_y()+(self.winfo_height()-height)//2}")
         panel = tk.Frame(window, bg="#100b20", padx=25, pady=22, highlightthickness=1, highlightbackground="#7c3aed")
         panel.pack(fill="both", expand=True, padx=14, pady=14)
         tk.Label(panel, text=title, bg="#100b20", fg="#f5f3ff", font=("Segoe UI", 15, "bold")).pack(anchor="w")
-        tk.Label(panel, text=message, bg="#100b20", fg="#cfc3e6", font=("Segoe UI", 10), justify="left").pack(anchor="w", pady=(9, 18))
-        buttons = tk.Frame(panel, bg="#100b20"); buttons.pack(fill="x", side="bottom")
+        buttons = tk.Frame(panel, bg="#100b20", height=42)
+        buttons.pack(fill="x", side="bottom", pady=(12, 0)); buttons.pack_propagate(False)
+        tk.Label(panel, text=message, bg="#100b20", fg="#cfc3e6", font=("Segoe UI", 10),
+                 justify="left", anchor="nw", wraplength=390).pack(fill="both", expand=True, anchor="w", pady=(9, 4))
         def finish(value): result["value"] = value; window.destroy()
-        ttk.Button(buttons, text="ยกเลิก", command=lambda: finish(False)).pack(side="right")
-        ttk.Button(buttons, text="ยืนยัน", command=lambda: finish(True), style="Green.TButton").pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="ยกเลิก", command=lambda: finish(False)).pack(side="right", fill="y")
+        ttk.Button(buttons, text="ยืนยัน", command=lambda: finish(True), style="Green.TButton").pack(side="right", fill="y", padx=(0, 8))
         self.wait_window(window); return result["value"]
 
     def _themed_days_dialog(self):
