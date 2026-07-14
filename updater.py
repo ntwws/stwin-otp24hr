@@ -83,7 +83,9 @@ class UpdateManager:
                 "Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue\r\n"
                 "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n"
             )
-            script.write_text(content, encoding="utf-8-sig")
+            # PowerShell 5.1 needs a BOM for non-ASCII paths, but the frozen
+            # build may not include Python's optional utf_8_sig codec.
+            script.write_bytes(b"\xef\xbb\xbf" + content.encode("utf-8"))
             subprocess.Popen(
                 ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
                 creationflags=0x08000000,
