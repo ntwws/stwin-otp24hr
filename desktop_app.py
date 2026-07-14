@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import winsound
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from datetime import datetime
@@ -713,6 +714,7 @@ class WebStyleApp(tk.Tk):
         order_actions = tk.Frame(card, bg="#ffffff")
         order_actions.pack(fill="x", pady=(10, 0))
         ttk.Button(order_actions, text="ตรวจ OTP ตอนนี้", command=self.poll_selected).pack(side="left")
+        ttk.Button(order_actions, text="ขอ OTP ซ้ำ", command=lambda: self.command_selected("resend")).pack(side="left", padx=(7, 0))
         ttk.Button(order_actions, text="เสร็จสิ้น", command=lambda: self.command_selected("complete")).pack(side="left", padx=7)
         ttk.Button(order_actions, text="ยกเลิก", command=lambda: self.command_selected("cancel"),
                    style="Danger.TButton").pack(side="left")
@@ -1243,9 +1245,12 @@ class WebStyleApp(tk.Tk):
                 continue
             state, _, value = str(raw).partition(":")
             if state == "STATUS_OK":
+                first_receipt = self.orders[aid].get("code") != value
                 self.orders[aid].update(status="ได้รับ OTP แล้ว", code=value, active=False)
                 if self.cloud and not self.orders[aid].get("cloud_recorded"):
                     self._record_cloud_success(aid)
+                if first_receipt:
+                    self._notify_otp(self.orders[aid]["phone"], value)
             else:
                 self.orders[aid]["status"] = ERRORS.get(state, str(raw))
                 if state == "STATUS_CANCEL":
@@ -1281,7 +1286,8 @@ class WebStyleApp(tk.Tk):
         aid = self._selected_id()
         if not aid: return
         if name == "cancel" and not self._themed_confirm("ยืนยันการยกเลิก", "ยืนยันยกเลิกหมายเลขที่เลือก?"): return
-        status = 6 if name == "complete" else 8
+        if name == "resend" and not self._themed_confirm("ขอ OTP ซ้ำ", "ต้องการรอรับ OTP ข้อความถัดไปจากหมายเลขนี้หรือไม่?"): return
+        status = {"complete": 6, "cancel": 8, "resend": 3}[name]
         self._run(lambda: self._client().request("setStatus", id=aid, status=status),
                   lambda _: self._commanded(aid, name))
 
@@ -1290,11 +1296,28 @@ class WebStyleApp(tk.Tk):
             if name == "cancel":
                 self.orders.pop(aid, None)
                 if self.table.exists(aid): self.table.delete(aid)
-            else:
+            elif name == "complete":
                 self.orders.pop(aid, None)
                 self.polling_ids.discard(aid)
                 if self.table.exists(aid): self.table.delete(aid)
+            else:
+                self.orders[aid].update(status="ขอ OTP ซ้ำแล้ว • กำลังรอ SMS…", code="—", active=True)
+                self._sync_row(aid)
+                self._start_timers()
+                self.notice_var.set(f"กำลังรอ OTP ข้อความถัดไปของ {self.orders[aid]['phone']}")
             self._save_orders()
+
+    def _notify_otp(self, phone, code):
+        try:
+            winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        except (RuntimeError, OSError):
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        self.notice_var.set(f"OTP เข้าแล้ว • {phone} • {code}")
+        try:
+            self.bell()
+            ctypes.windll.user32.FlashWindow(self.winfo_id(), True)
+        except (tk.TclError, OSError):
+            pass
 
     def _sync_row(self, aid):
         order = self.orders[aid]; minutes, seconds = divmod(max(0, order["remaining"]), 60)
@@ -1323,7 +1346,7 @@ class WebStyleApp(tk.Tk):
     def _auto_poll(self):
         ids = [aid for aid, order in self.orders.items() if order["active"]]
         if ids:
-            if len(self.key_var.get().strip()) >= 8:
+            if self.cloud_user or len(self.key_var.get().strip()) >= 8:
                 self._poll_ids(ids)
             self.poll_job = self.after(POLL_MS, self._auto_poll)
         else: self.poll_job = None
