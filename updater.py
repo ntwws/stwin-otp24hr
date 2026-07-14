@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 
@@ -36,7 +37,10 @@ class UpdateManager:
     def download_verified(self, manifest, progress=None):
         folder = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "OTP24HR" / "updates"
         folder.mkdir(parents=True, exist_ok=True)
-        target = folder / f"OTP24HR-{manifest['version']}.exe"
+        package_type = str(manifest.get("package_type", "")).lower()
+        url_suffix = Path(urllib.parse.urlparse(manifest["download_url"]).path).suffix.lower()
+        suffix = ".zip" if package_type == "zip" or url_suffix == ".zip" else ".exe"
+        target = folder / f"OTP24HR-{manifest['version']}{suffix}"
         request = urllib.request.Request(manifest["download_url"], headers={"User-Agent": "OTP24HR-Updater/1.0"})
         digest = hashlib.sha256()
         with urllib.request.urlopen(request, timeout=60) as response, open(target, "wb") as stream:
@@ -54,10 +58,38 @@ class UpdateManager:
         return str(target)
 
     @staticmethod
-    def install_and_restart(new_exe: str):
+    def install_and_restart(update_file: str):
         if not getattr(sys, "frozen", False):
             raise RuntimeError("ติดตั้งอัปเดตได้เฉพาะโปรแกรม EXE")
-        current = os.path.abspath(sys.executable); new_exe = os.path.abspath(new_exe)
+        current = os.path.abspath(sys.executable); update_file = os.path.abspath(update_file)
+        if update_file.lower().endswith(".zip"):
+            current_dir = os.path.dirname(current)
+            stage = str(Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "OTP24HR" / "update-stage")
+            script = Path(tempfile.gettempdir()) / "otp24hr-update.ps1"
+            def ps_quote(value):
+                return "'" + str(value).replace("'", "''") + "'"
+            content = (
+                "$ErrorActionPreference = 'Stop'\r\n"
+                "Start-Sleep -Seconds 2\r\n"
+                f"$package = {ps_quote(update_file)}\r\n"
+                f"$stage = {ps_quote(stage)}\r\n"
+                f"$target = {ps_quote(current_dir)}\r\n"
+                f"$exe = {ps_quote(current)}\r\n"
+                "Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue\r\n"
+                "Expand-Archive -LiteralPath $package -DestinationPath $stage -Force\r\n"
+                "Get-ChildItem -LiteralPath $stage -Force | Copy-Item -Destination $target -Recurse -Force\r\n"
+                "Start-Process -FilePath $exe\r\n"
+                "Remove-Item -LiteralPath $package -Force -ErrorAction SilentlyContinue\r\n"
+                "Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue\r\n"
+                "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n"
+            )
+            script.write_text(content, encoding="utf-8-sig")
+            subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                creationflags=0x08000000,
+            )
+            return
+        new_exe = update_file
         script = Path(tempfile.gettempdir()) / "otp24hr-update.cmd"
         content = (
             "@echo off\r\n"
