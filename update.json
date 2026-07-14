@@ -1,6 +1,6 @@
 {
-  "version": "1.0.8",
-  "download_url": "https://github.com/ntwws/stwin-otp24hr/releases/download/v1.0.8/OTP24HR-by-STWIN.exe",
-  "sha256": "d162257601fc9a5c49d188af28db6d436bb359bd6eb0fde530e09ca4fe17dc14",
+  "version": "1.0.9",
+  "download_url": "https://github.com/ntwws/stwin-otp24hr/releases/download/v1.0.9/OTP24HR-by-STWIN.exe",
+  "sha256": "5f0bca295e9092c155fa2267b48083ebe165269a83637b3f2f64a67d9c206f27",
   "notes": "UI improvements, cancelled-row cleanup, and secure automatic updates"
 }
