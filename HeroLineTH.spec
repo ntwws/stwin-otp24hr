@@ -29,9 +29,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='OTP24HR by STWIN',
     debug=False,
     bootloader_ignore_signals=False,
@@ -46,4 +45,14 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['1.ico'],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='OTP24HR by STWIN',
 )
