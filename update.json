@@ -1,7 +1,7 @@
 {
-  "version": "1.0.21",
-  "download_url": "https://github.com/ntwws/stwin-otp24hr/releases/download/v1.0.21/OTP24HR-by-STWIN-portable.zip",
-  "sha256": "8e45d5d426fdf0dc941a59f2a262c790ee948f4892eeaa583e9fd617c7a6cfe8",
+  "version": "1.0.22",
+  "download_url": "https://github.com/ntwws/stwin-otp24hr/releases/download/v1.0.22/OTP24HR-by-STWIN-portable.zip",
+  "sha256": "c0d1927dae77df25ecc0a1849f4495512b33d8505e4ddba323ae567c02aa0eab",
   "package_type": "zip",
   "notes": "Portable folder build: no temporary DLL extraction"
 }
