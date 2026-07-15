@@ -24,7 +24,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.20"
+APP_VERSION = "1.0.21"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
 
 
@@ -645,7 +645,7 @@ class OrderListView(ctk.CTkFrame):
         self.event_generate("<<TreeviewSelect>>")
 
     def _action(self, iid, name):
-        self._selected = iid
+        self._select(iid)
         if self.on_action:
             self.on_action(name)
 
@@ -660,6 +660,11 @@ class OrderListView(ctk.CTkFrame):
         self._select(iid)
         if self.on_copy_number:
             self.on_copy_number(iid)
+
+    def _context_menu(self, iid, event):
+        self._select(iid)
+        if self.on_more:
+            self.on_more(iid, event.x_root, event.y_root)
 
     def _copy(self, value):
         if not value or value == "—":
@@ -782,6 +787,8 @@ class OrderListView(ctk.CTkFrame):
             more.grid(row=0, column=5)
             for target in (row, number):
                 target.bind("<Button-1>", lambda _e, value=iid: self._select(value))
+            for target in (row, number, phone_label, flag, time_label, status_label, code_label):
+                target.bind("<Button-3>", lambda event, value=iid: self._context_menu(value, event))
             action_bar = self._make_action_bar(row, iid) if selected else None
             self._row_widgets[iid] = {
                 "time": time_label, "status": status_label, "code": code_label,
@@ -1384,16 +1391,22 @@ class WebStyleApp(tk.Tk):
         self._render_orders()
 
     def _order_matches_filter(self, order):
-        completed = order.get("code") not in (None, "", "—") or "ได้รับ OTP" in str(order.get("status", ""))
+        completed = self._order_is_success(order)
         # Keep received OTPs in the working list until the user explicitly
         # presses "เสร็จสิ้น".  Receiving an OTP stops polling, but must not
         # move the row away while the user is still copying/using the code.
-        if self.table_filter == "active" and not (order.get("active") or completed):
+        if self.table_filter == "active" and not (order.get("active") or (completed and order.get("in_working", False))):
             return False
         if self.table_filter == "success" and not completed:
             return False
         query = self.search_var.get().strip().lower()
-        return not query or query in " ".join(str(order.get(key, "")) for key in ("phone", "status", "code")).lower()
+        return not query or query in " ".join(str(order.get(key, "")) for key in ("phone", "status", "code", "buyer")).lower()
+
+    @staticmethod
+    def _order_is_success(order):
+        return (order.get("outcome") == "success" or order.get("cloud_recorded") is True
+                or order.get("code") not in (None, "", "—")
+                or "ได้รับ OTP" in str(order.get("status", "")))
 
     def _render_orders(self):
         if not hasattr(self, "table"):
@@ -1420,10 +1433,8 @@ class WebStyleApp(tk.Tk):
         if not hasattr(self, "tab_buttons"):
             return
         active = sum(1 for order in self.orders.values()
-                     if order.get("active") or order.get("code") not in (None, "", "—")
-                     or "ได้รับ OTP" in str(order.get("status", "")))
-        success = sum(1 for order in self.orders.values()
-                      if order.get("code") not in (None, "", "—") or "ได้รับ OTP" in str(order.get("status", "")))
+                     if order.get("active") or (self._order_is_success(order) and order.get("in_working", False)))
+        success = sum(1 for order in self.orders.values() if self._order_is_success(order))
         counts = (active, success, len(self.orders))
         if getattr(self, "_last_tab_counts", None) == counts:
             return
@@ -1468,11 +1479,11 @@ class WebStyleApp(tk.Tk):
             try:
                 bg = widget.cget("background")
                 if bg in backgrounds: widget.configure(background=backgrounds[bg])
-            except (tk.TclError, AttributeError): pass
+            except (tk.TclError, AttributeError, ValueError): pass
             try:
                 fg = widget.cget("foreground")
                 if fg in foregrounds: widget.configure(foreground=foregrounds[fg])
-            except (tk.TclError, AttributeError): pass
+            except (tk.TclError, AttributeError, ValueError): pass
             if widget.winfo_children(): self._apply_dark_palette(widget)
 
     def _require_login(self):
@@ -1506,10 +1517,49 @@ class WebStyleApp(tk.Tk):
         self.monthly_purchased = int(stats.get("monthly_purchased", 0))
         self.monthly_success = int(stats.get("monthly_success", 0))
         self.notice_var.set(f"เข้าสู่ระบบ: {self.cloud_user} • ซื้อเดือนนี้ {self.monthly_purchased} • OTP สำเร็จ {self.monthly_success}")
+        self._run(self._fetch_cloud_history, self._cloud_history_loaded)
         if not self.update_checked:
             self.update_checked = True
             self.after(1800, lambda: self._check_for_updates(True))
         self.after_idle(self._show_main_window)
+
+    def _fetch_cloud_history(self):
+        items, offset = [], 0
+        while True:
+            page = self.cloud.request(f"/activations/history?limit=500&offset={offset}")
+            batch = page.get("items", [])
+            if not isinstance(batch, list):
+                break
+            items.extend(batch)
+            if not page.get("has_more") or not batch:
+                break
+            offset = int(page.get("next_offset", offset + len(batch)))
+        return items
+
+    def _cloud_history_loaded(self, items):
+        for item in items:
+            aid = str(item.get("activation_id", ""))
+            if not aid:
+                continue
+            if aid in self.orders:
+                self.orders[aid].setdefault("buyer", item.get("username") or self.cloud_user)
+                self.orders[aid].setdefault("purchased_at", item.get("purchased_at") or "")
+                continue
+            received = bool(item.get("otp_received_at") or item.get("otp_code"))
+            state = str(item.get("status") or ("success" if received else "active"))
+            status = "ได้รับ OTP แล้ว" if received else {
+                "cancelled": "ยกเลิกแล้ว", "expired": "หมดเวลา",
+                "completed": "เสร็จสิ้น", "active": "ซื้อแล้ว"
+            }.get(state, state)
+            self.orders[aid] = {
+                "phone": item.get("phone") or "—", "price": float(item.get("price") or 0),
+                "remaining": 0, "status": status, "code": item.get("otp_code") or "—",
+                "active": False, "in_working": False, "actionable": False, "history": True,
+                "buyer": item.get("username") or "—", "purchased_at": item.get("purchased_at") or "",
+                "outcome": "success" if received else state, "cloud_recorded": received
+            }
+        self._render_orders()
+        self._save_orders()
 
     def _show_main_window(self):
         if not self.winfo_exists():
@@ -1642,10 +1692,21 @@ class WebStyleApp(tk.Tk):
             entry = ttk.Entry(panel, textvariable=variable, show="•" if hidden else "", font=("Segoe UI", 10))
             entry.pack(fill="x", ipady=4); entries.append(entry)
         tk.Label(panel, text="Role", bg="#0b1f36", fg="#b8cbdd", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(9, 4))
-        role_var = tk.StringVar(value="user")
-        role_box = ttk.Combobox(panel, textvariable=role_var, values=("user", "admin"), state="readonly",
-                                font=("Segoe UI", 10))
-        role_box.pack(fill="x", ipady=3)
+        role_var = tk.StringVar(value="ผู้ใช้ทั่วไป")
+        role_box = ctk.CTkSegmentedButton(
+            panel, values=["ผู้ใช้ทั่วไป", "ผู้ดูแลระบบ"], variable=role_var,
+            height=40, corner_radius=8, fg_color="#0c1222", unselected_color="#0c1222",
+            unselected_hover_color="#252047", selected_color="#6d28d9",
+            selected_hover_color="#7c3aed", text_color="#f5f3ff",
+            border_width=1,
+            font=ctk.CTkFont("Leelawadee UI", 12, "bold"))
+        role_box.pack(fill="x")
+        role_hint_var = tk.StringVar(value="ใช้งานและซื้อเบอร์ได้ แต่จัดการผู้ใช้อื่นไม่ได้")
+        tk.Label(panel, textvariable=role_hint_var, bg="#0b1f36", fg="#8fa9c2",
+                 font=("Segoe UI", 8), anchor="w").pack(fill="x", pady=(4, 0))
+        role_var.trace_add("write", lambda *_: role_hint_var.set(
+            "จัดการผู้ใช้ รายงาน และเติมเงินได้" if role_var.get() == "ผู้ดูแลระบบ"
+            else "ใช้งานและซื้อเบอร์ได้ แต่จัดการผู้ใช้อื่นไม่ได้"))
         status = tk.Label(panel, text="", bg="#0b1f36", fg="#ff7b7b", font=("Segoe UI", 9), anchor="w")
         status.pack(fill="x", pady=(8, 0))
         def create():
@@ -1656,7 +1717,7 @@ class WebStyleApp(tk.Tk):
                 status.configure(text="Password ต้องมีอย่างน้อย 8 ตัวอักษร", fg="#ff7b7b"); return
             if password != confirm_var.get():
                 status.configure(text="ยืนยัน Password ไม่ตรงกัน", fg="#ff7b7b"); return
-            role = role_var.get()
+            role = "admin" if role_var.get() == "ผู้ดูแลระบบ" else "user"
             try: self.cloud.request("/admin/users", "POST", {"username": username, "password": password, "role": role})
             except Exception as exc:
                 status.configure(text=str(exc), fg="#ff7b7b"); return
@@ -1962,7 +2023,10 @@ class WebStyleApp(tk.Tk):
             status = "กำลังรอ SMS…" if not item["ready_error"] else "ซื้อแล้ว • รอตรวจสถานะ"
             self.orders[aid] = {"phone": "+" + phone.lstrip("+"), "price": price,
                                 "remaining": 1200, "status": status, "code": "—", "active": True,
-                                "cloud_recorded": False}
+                                "in_working": True, "actionable": True, "history": False,
+                                "buyer": self.cloud_user or "local",
+                                "purchased_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "outcome": "active", "cloud_recorded": False}
             self.table.insert("", "end", iid=aid)
             self._sync_row(aid)
         if bought:
@@ -2000,10 +2064,12 @@ class WebStyleApp(tk.Tk):
 
     def poll_selected(self):
         aid = self._selected_id()
-        if aid: self._poll_ids([aid])
+        if aid and self.orders.get(aid, {}).get("actionable", True):
+            self._poll_ids([aid])
 
     def _poll_ids(self, ids):
-        ids = [aid for aid in ids if aid in self.orders and aid not in self.polling_ids]
+        ids = [aid for aid in ids if aid in self.orders and aid not in self.polling_ids
+               and self.orders[aid].get("actionable", True)]
         if not ids:
             return
         self.polling_ids.update(ids)
@@ -2022,8 +2088,7 @@ class WebStyleApp(tk.Tk):
             if aid not in self.orders: continue
             if error:
                 if "ยกเลิก" in error:
-                    self.orders.pop(aid, None)
-                    if self.table.exists(aid): self.table.delete(aid)
+                    self._set_local_history_status(aid, "cancelled")
                     continue
                 self.orders[aid]["status"] = f"ตรวจไม่สำเร็จ: {error}"
                 self._sync_row(aid)
@@ -2031,7 +2096,8 @@ class WebStyleApp(tk.Tk):
             state, _, value = str(raw).partition(":")
             if state == "STATUS_OK":
                 first_receipt = self.orders[aid].get("code") != value
-                self.orders[aid].update(status="ได้รับ OTP แล้ว", code=value, active=False)
+                self.orders[aid].update(status="ได้รับ OTP แล้ว", code=value, active=False,
+                                        in_working=True, outcome="success")
                 if self.cloud and not self.orders[aid].get("cloud_recorded"):
                     self._record_cloud_success(aid)
                 if first_receipt:
@@ -2039,8 +2105,7 @@ class WebStyleApp(tk.Tk):
             else:
                 self.orders[aid]["status"] = ERRORS.get(state, str(raw))
                 if state == "STATUS_CANCEL":
-                    self.orders.pop(aid, None)
-                    if self.table.exists(aid): self.table.delete(aid)
+                    self._set_local_history_status(aid, "cancelled")
                     continue
             self._sync_row(aid)
         self._save_orders()
@@ -2050,7 +2115,9 @@ class WebStyleApp(tk.Tk):
         self.cloud_success_pending.add(aid)
         def work():
             try:
-                self.cloud.request("/activations/success", "POST", {"activation_id": aid})
+                self.cloud.request("/activations/success", "POST", {
+                    "activation_id": aid, "otp_code": self.orders[aid].get("code", "")
+                })
                 return None
             except Exception as exc:
                 return str(exc)
@@ -2067,9 +2134,30 @@ class WebStyleApp(tk.Tk):
             self.monthly_success += 1
         self._save_orders()
 
+    def _record_cloud_status(self, aid, status):
+        if not self.cloud:
+            return
+        self._run(lambda: self.cloud.request("/activations/status", "POST", {
+            "activation_id": aid, "status": status
+        }))
+
+    def _set_local_history_status(self, aid, state):
+        if aid not in self.orders:
+            return
+        labels = {"cancelled": "ยกเลิกแล้ว", "expired": "หมดเวลา", "completed": "เสร็จสิ้น"}
+        order = self.orders[aid]
+        order.update(status=labels.get(state, state), active=False, in_working=False,
+                     actionable=False, history=True, outcome=state)
+        self.polling_ids.discard(aid)
+        self._record_cloud_status(aid, state)
+        self._sync_row(aid)
+
     def command_selected(self, name):
         aid = self._selected_id()
         if not aid: return
+        if not self.orders.get(aid, {}).get("actionable", True):
+            self.notice_var.set("รายการนี้เป็นประวัติแล้ว • ใช้คลิกขวาเพื่อคัดลอกหรือรายงานเบอร์")
+            return
         if name == "cancel" and not self._themed_confirm("ยืนยันการยกเลิก", "ยืนยันยกเลิกหมายเลขที่เลือก?"): return
         if name == "resend" and not self._themed_confirm("ขอ OTP ซ้ำ", "ต้องการรอรับ OTP ข้อความถัดไปจากหมายเลขนี้หรือไม่?"): return
         status = {"complete": 6, "cancel": 8, "resend": 3}[name]
@@ -2079,14 +2167,21 @@ class WebStyleApp(tk.Tk):
     def _commanded(self, aid, name):
         if aid in self.orders:
             if name == "cancel":
-                self.orders.pop(aid, None)
-                if self.table.exists(aid): self.table.delete(aid)
+                self._set_local_history_status(aid, "cancelled")
             elif name == "complete":
-                self.orders.pop(aid, None)
+                order = self.orders[aid]
+                received = self._order_is_success(order)
+                order.update(active=False, in_working=False, actionable=False, history=True,
+                             outcome="success" if received else "completed")
+                if not received:
+                    order["status"] = "เสร็จสิ้น"
                 self.polling_ids.discard(aid)
-                if self.table.exists(aid): self.table.delete(aid)
+                self._record_cloud_status(aid, "completed")
+                self._sync_row(aid)
             else:
-                self.orders[aid].update(status="ขอ OTP ซ้ำแล้ว • กำลังรอ SMS…", code="—", active=True)
+                self.orders[aid].update(status="ขอ OTP ซ้ำแล้ว • กำลังรอ SMS…", code="—", active=True,
+                                        in_working=True, actionable=True, outcome="active")
+                self._record_cloud_status(aid, "active")
                 self._sync_row(aid)
                 self._start_timers()
                 self.notice_var.set(f"กำลังรอ OTP ข้อความถัดไปของ {self.orders[aid]['phone']}")
@@ -2117,9 +2212,17 @@ class WebStyleApp(tk.Tk):
             return
         if not self.table.exists(aid):
             self.table.insert("", "end", iid=aid)
-        minutes, seconds = divmod(max(0, order["remaining"]), 60)
-        self.table.item(aid, values=(order["phone"], f"{minutes:02d}:{seconds:02d}",
-                                    order["status"], order["code"], "•••"))
+        minutes, seconds = divmod(max(0, int(order.get("remaining", 0))), 60)
+        if order.get("active") or order.get("in_working"):
+            time_text = f"{minutes:02d}:{seconds:02d}"
+        else:
+            time_text = str(order.get("purchased_at") or "—").replace("T", " ")[:16]
+        buyer = str(order.get("buyer") or "—")
+        status_text = str(order.get("status") or "—")
+        if buyer != "—":
+            status_text = f"{status_text} • {buyer}"
+        self.table.item(aid, values=(order["phone"], time_text,
+                                    status_text, order.get("code", "—"), "•••"))
         self._update_tab_labels()
 
     def _start_timers(self):
@@ -2132,9 +2235,7 @@ class WebStyleApp(tk.Tk):
             if order["active"]:
                 order["remaining"] = max(0, order["remaining"] - 1)
                 if order["remaining"] == 0:
-                    order["active"] = False
-                    order["status"] = "หมดเวลา"
-                    self.polling_ids.discard(aid)
+                    self._set_local_history_status(aid, "expired")
                     self._save_orders()
                 else:
                     active = True
@@ -2259,26 +2360,32 @@ class WebStyleApp(tk.Tk):
             loaded = payload.get("orders", {})
             if not isinstance(loaded, dict):
                 return
-            cleaned = False
             pending_success = []
             for aid, order in loaded.items():
                 if not isinstance(order, dict) or not order.get("phone"):
                     continue
-                if "ยกเลิก" in str(order.get("status", "")):
-                    cleaned = True
-                    continue
                 status = str(order.get("status", ""))
-                if "เสร็จสิ้น" in status:
-                    cleaned = True
-                    continue
                 order.setdefault("price", 0.0); order.setdefault("code", "—")
                 order.setdefault("cloud_recorded", False)
                 order.setdefault("status", "ไม่ทราบสถานะ"); order.setdefault("active", False)
+                success = (order.get("code") not in (None, "", "—") or "ได้รับ OTP" in status
+                           or order.get("cloud_recorded") is True)
+                final = any(text in status for text in ("ยกเลิก", "เสร็จสิ้น", "หมดเวลา"))
+                order.setdefault("in_working", bool(order["active"] or (success and not final)))
+                order.setdefault("history", final)
+                order.setdefault("actionable", not final)
+                order.setdefault("buyer", self.cloud_user or "local")
+                order.setdefault("purchased_at", "")
+                order.setdefault("outcome", "success" if success else
+                                 ("cancelled" if "ยกเลิก" in status else
+                                  "expired" if "หมดเวลา" in status else
+                                  "completed" if "เสร็จสิ้น" in status else "active"))
                 if "ได้รับ OTP" in status and self.cloud and not order.get("cloud_recorded"):
                     pending_success.append(str(aid))
                 order["remaining"] = max(0, int(order.get("remaining", 0)) - (elapsed if order["active"] else 0))
                 if order["active"] and order["remaining"] == 0:
-                    order["active"] = False; order["status"] = "หมดเวลา"
+                    order.update(active=False, in_working=False, actionable=False, history=True,
+                                 status="หมดเวลา", outcome="expired")
                 self.orders[str(aid)] = order
                 self.table.insert("", "end", iid=str(aid)); self._sync_row(str(aid))
             if self.orders:
@@ -2286,7 +2393,7 @@ class WebStyleApp(tk.Tk):
             if any(order["active"] for order in self.orders.values()): self._start_timers()
             for aid in pending_success:
                 self.after(0, lambda activation_id=aid: self._record_cloud_success(activation_id))
-            if cleaned: self._save_orders()
+            self._save_orders()
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return
 

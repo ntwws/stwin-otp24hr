@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hero-line-coordinator",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-12",
+  "durable_objects": {
+    "bindings": [{ "name": "PURCHASE_QUEUE", "class_name": "PurchaseQueue" }]
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "hero-line-data",
+    "database_id": "e59764b0-a5cf-49b3-badf-3929ebd353bc",
+    "migrations_dir": "migrations"
+  }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PurchaseQueue"] }]
+}
