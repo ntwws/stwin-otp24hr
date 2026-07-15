@@ -16,6 +16,11 @@ async function phoneHash(env, phone) {
   return b64(new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(String(phone).replace(/\D/g, "")))));
 }
 function maskPhone(phone) { const p = String(phone).replace(/\D/g, ""); return p.length < 4 ? "****" : `***${p.slice(-4)}`; }
+function parseDailyLimit(value) {
+  const parsed = Number(value ?? 0);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 1000) return null;
+  return parsed;
+}
 
 export class PurchaseQueue {
   constructor(ctx) { this.ctx = ctx; }
@@ -42,7 +47,18 @@ async function authenticate(request, env) {
   const raw = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
   if (!raw) return null;
   const tokenHash = await sha256(raw);
-  return env.DB.prepare(`SELECT u.id, u.username, u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>datetime('now') AND u.active=1`).bind(tokenHash).first();
+  return env.DB.prepare(`SELECT u.id, u.username, u.role, u.daily_limit FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>datetime('now') AND u.active=1`).bind(tokenHash).first();
+}
+async function dailyUsage(env, userId) {
+  const row = await env.DB.prepare(`SELECT u.daily_limit,
+    COUNT(a.activation_id) purchased_today
+    FROM users u LEFT JOIN activations a ON a.user_id=u.id
+      AND date(a.purchased_at,'+7 hours')=date('now','+7 hours')
+    WHERE u.id=? AND u.active=1 GROUP BY u.id,u.daily_limit`).bind(userId).first();
+  return {
+    limit: Number(row?.daily_limit || 0),
+    purchased: Number(row?.purchased_today || 0)
+  };
 }
 async function queue(env, payload) {
   const id = env.PURCHASE_QUEUE.idFromName("shared-wallet");
@@ -66,7 +82,7 @@ export default {
     try {
       const url = new URL(request.url), path = url.pathname;
       if (request.method === "GET" && path === "/health") return json({ ok: true });
-      const body = request.method === "POST" ? await request.json() : {};
+      const body = (request.method === "POST" || request.method === "PATCH") ? await request.json() : {};
 
       if (request.method === "POST" && path === "/admin/users") {
         const adminUser = await authenticate(request, env);
@@ -76,10 +92,12 @@ export default {
         if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username) || password.length < 8) return json({ error: "invalid_username_or_password" }, 400);
         const existing = await env.DB.prepare("SELECT id FROM users WHERE username=? COLLATE NOCASE").bind(username).first();
         if (existing) return json({ error: "Username นี้มีอยู่แล้ว กรุณาใช้ชื่ออื่น" }, 409);
+        const dailyLimit = parseDailyLimit(body.daily_limit);
+        if (dailyLimit === null) return json({ error: "ลิมิตต่อวันต้องเป็นตัวเลข 0–1000" }, 400);
         const salt = b64(bytes(16)), hash = await passwordHash(password, salt);
-        await env.DB.prepare("INSERT INTO users(username,password_hash,password_salt,role) VALUES(?,?,?,?)")
-          .bind(username, hash, salt, body.role === "admin" ? "admin" : "user").run();
-        return json({ ok: true, username });
+        await env.DB.prepare("INSERT INTO users(username,password_hash,password_salt,role,daily_limit) VALUES(?,?,?,?,?)")
+          .bind(username, hash, salt, body.role === "admin" ? "admin" : "user", dailyLimit).run();
+        return json({ ok: true, username, daily_limit: dailyLimit });
       }
       if (request.method === "POST" && path === "/auth/login") {
         const user = await env.DB.prepare("SELECT * FROM users WHERE username=? COLLATE NOCASE AND active=1").bind(String(body.username || "").trim()).first();
@@ -92,7 +110,22 @@ export default {
       if (!user) return json({ error: "กรุณาเข้าสู่ระบบใหม่" }, 401);
 
       if (path === "/queue/status") return queue(env, { action: "status" });
-      if (request.method === "POST" && path === "/queue/acquire") return queue(env, { action: "acquire", userId: user.id, username: user.username, ttlMs: 180000 });
+      if (request.method === "POST" && path === "/queue/acquire") {
+        const quantityValue = Number(body.quantity ?? 1);
+        if (!Number.isInteger(quantityValue) || quantityValue < 1 || quantityValue > 5) {
+          return json({ error: "จำนวนที่ซื้อต้องอยู่ระหว่าง 1–5 เบอร์" }, 400);
+        }
+        const requestedQuantity = quantityValue;
+        const usage = await dailyUsage(env, user.id);
+        if (usage.limit > 0 && usage.purchased + requestedQuantity > usage.limit) {
+          const remaining = Math.max(0, usage.limit - usage.purchased);
+          return json({
+            error: `โควตาซื้อวันนี้เหลือ ${remaining} เบอร์ (กำหนดไว้ ${usage.limit} เบอร์/วัน)`,
+            daily_limit: usage.limit, purchased_today: usage.purchased, remaining
+          }, 429);
+        }
+        return queue(env, { action: "acquire", userId: user.id, username: user.username, ttlMs: 180000 });
+      }
       if (request.method === "POST" && path === "/queue/release") return queue(env, { action: "release", userId: user.id });
       if (request.method === "POST" && path === "/hero/request") {
         const action = String(body.action || "");
@@ -103,6 +136,10 @@ export default {
           const statusResponse = await queue(env, { action: "status" });
           const status = await statusResponse.json();
           if (!status.lock || status.lock.userId !== user.id) return json({ error: "กรุณาจองคิวซื้อก่อน" }, 409);
+          const usage = await dailyUsage(env, user.id);
+          if (usage.limit > 0 && usage.purchased >= usage.limit) {
+            return json({ error: `ครบโควตาซื้อ ${usage.limit} เบอร์สำหรับวันนี้แล้ว` }, 429);
+          }
         }
         return heroRequest(env, action, body.params || {});
       }
@@ -110,9 +147,19 @@ export default {
       if (request.method === "GET" && path === "/me/stats") {
         const row = await env.DB.prepare(`SELECT
           COUNT(CASE WHEN purchased_at>=datetime('now','start of month') THEN 1 END) monthly_purchased,
+          COUNT(CASE WHEN date(purchased_at,'+7 hours')=date('now','+7 hours') THEN 1 END) daily_purchased,
           COUNT(CASE WHEN otp_received_at IS NOT NULL AND strftime('%Y-%m',otp_received_at)=strftime('%Y-%m','now') THEN 1 END) monthly_success
           FROM activations WHERE user_id=?`).bind(user.id).first();
-        return json({ username: user.username, monthly_purchased: row?.monthly_purchased || 0, monthly_success: row?.monthly_success || 0 });
+        const dailyLimit = Number(user.daily_limit || 0);
+        const dailyPurchased = Number(row?.daily_purchased || 0);
+        return json({
+          username: user.username,
+          monthly_purchased: row?.monthly_purchased || 0,
+          monthly_success: row?.monthly_success || 0,
+          daily_limit: dailyLimit,
+          daily_purchased: dailyPurchased,
+          daily_remaining: dailyLimit > 0 ? Math.max(0, dailyLimit - dailyPurchased) : null
+        });
       }
       if (request.method === "POST" && path === "/auth/change-password") {
         const current = String(body.current_password || ""), next = String(body.new_password || "");
@@ -134,6 +181,59 @@ export default {
           WHERE u.active=1 GROUP BY u.id,u.username ORDER BY monthly_success DESC,u.username
         `).all();
         return json({ month: new Date().toISOString().slice(0, 7), users: rows.results || [] });
+      }
+      if (request.method === "GET" && path === "/admin/users") {
+        if (user.role !== "admin") return json({ error: "ไม่มีสิทธิ์จัดการผู้ใช้" }, 403);
+        const rows = await env.DB.prepare(`SELECT u.id,u.username,u.role,u.daily_limit,u.created_at,
+          COUNT(CASE WHEN date(a.purchased_at,'+7 hours')=date('now','+7 hours') THEN 1 END) purchased_today,
+          COUNT(CASE WHEN a.purchased_at>=datetime('now','start of month') THEN 1 END) purchased_month
+          FROM users u LEFT JOIN activations a ON a.user_id=u.id
+          WHERE u.active=1 GROUP BY u.id,u.username,u.role,u.daily_limit,u.created_at
+          ORDER BY CASE WHEN u.role='admin' THEN 0 ELSE 1 END,u.username COLLATE NOCASE`).all();
+        return json({ users: rows.results || [], current_user_id: user.id });
+      }
+      const adminUserMatch = path.match(/^\/admin\/users\/(\d+)$/);
+      if (adminUserMatch && (request.method === "PATCH" || request.method === "DELETE")) {
+        if (user.role !== "admin") return json({ error: "ไม่มีสิทธิ์จัดการผู้ใช้" }, 403);
+        const targetId = Number(adminUserMatch[1]);
+        if (targetId === Number(user.id)) {
+          return json({ error: "แก้ไขหรือลบบัญชีที่กำลังใช้งานจากหน้านี้ไม่ได้ กรุณาใช้เมนูตั้งค่า" }, 400);
+        }
+        const target = await env.DB.prepare("SELECT * FROM users WHERE id=? AND active=1").bind(targetId).first();
+        if (!target) return json({ error: "ไม่พบบัญชีผู้ใช้" }, 404);
+        if (request.method === "DELETE") {
+          const activeOrders = await env.DB.prepare("SELECT COUNT(*) count FROM activations WHERE user_id=? AND status='active'")
+            .bind(targetId).first();
+          if (Number(activeOrders?.count || 0) > 0) {
+            return json({ error: `สมาชิกยังมี ${activeOrders.count} หมายเลขกำลังใช้งาน กรุณาให้สมาชิกจัดการรายการให้เสร็จก่อน` }, 409);
+          }
+          await env.DB.batch([
+            env.DB.prepare("UPDATE users SET active=0 WHERE id=?").bind(targetId),
+            env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(targetId)
+          ]);
+          return json({ ok: true, username: target.username });
+        }
+        const username = String(body.username || "").trim();
+        const password = String(body.password || "");
+        if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) return json({ error: "Username ต้องมี 3–32 ตัว และใช้เฉพาะ A-Z, 0-9, จุด, _ หรือ -" }, 400);
+        if (password && password.length < 8) return json({ error: "รหัสผ่านใหม่ต้องมีอย่างน้อย 8 ตัวอักษร" }, 400);
+        const existing = await env.DB.prepare("SELECT id FROM users WHERE username=? COLLATE NOCASE AND id<>?").bind(username, targetId).first();
+        if (existing) return json({ error: "Username นี้มีอยู่แล้ว กรุณาใช้ชื่ออื่น" }, 409);
+        const role = body.role === "admin" ? "admin" : "user";
+        const dailyLimit = parseDailyLimit(body.daily_limit);
+        if (dailyLimit === null) return json({ error: "ลิมิตต่อวันต้องเป็นตัวเลข 0–1000" }, 400);
+        let passwordHashValue = target.password_hash;
+        let passwordSaltValue = target.password_salt;
+        if (password) {
+          passwordSaltValue = b64(bytes(16));
+          passwordHashValue = await passwordHash(password, passwordSaltValue);
+        }
+        const statements = [env.DB.prepare(`UPDATE users SET username=?,role=?,daily_limit=?,password_hash=?,password_salt=? WHERE id=?`)
+          .bind(username, role, dailyLimit, passwordHashValue, passwordSaltValue, targetId)];
+        const usernameChanged = username.toLowerCase() !== String(target.username).toLowerCase();
+        if (password || usernameChanged) statements.push(env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(targetId));
+        await env.DB.batch(statements);
+        return json({ ok: true, id: targetId, username, role, daily_limit: dailyLimit });
       }
       if (request.method === "GET" && path === "/activations/history") {
         const requestedLimit = Number(url.searchParams.get("limit") || 25);

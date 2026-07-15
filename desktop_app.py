@@ -24,7 +24,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.22"
+APP_VERSION = "1.0.23"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
 
 
@@ -908,6 +908,8 @@ class WebStyleApp(tk.Tk):
         self.cloud_role = None
         self.monthly_success = 0
         self.monthly_purchased = 0
+        self.daily_limit = 0
+        self.daily_purchased = 0
         self.history_page = 1
         self.history_page_size = 25
         self.history_total = 0
@@ -1020,7 +1022,7 @@ class WebStyleApp(tk.Tk):
         self.history_nav_btn.pack(fill="x", pady=5)
         self.admin_report_btn = ttk.Button(nav, text="▥   รายงาน", style="Nav.TButton",
                                            command=self._show_admin_report)
-        self.create_user_btn = ttk.Button(nav, text="♙   ผู้ใช้งาน", style="Nav.TButton",
+        self.create_user_btn = ttk.Button(nav, text="♙   จัดการสมาชิก", style="Nav.TButton",
                                           command=self._show_create_user)
 
         nav_bottom = tk.Frame(sidebar, bg=palette["sidebar"], padx=14, pady=18)
@@ -1212,7 +1214,7 @@ class WebStyleApp(tk.Tk):
         self.history_nav_btn = ctk.CTkButton(nav, text="◷    ประวัติ OTP", command=lambda: self._set_table_filter("success"), **plain_nav)
         self.history_nav_btn.pack(fill="x", pady=4)
         self.admin_report_btn = ctk.CTkButton(nav, text="▥    รายงาน", command=self._show_admin_report, **plain_nav)
-        self.create_user_btn = ctk.CTkButton(nav, text="♙    ผู้ใช้งาน", command=self._show_create_user, **plain_nav)
+        self.create_user_btn = ctk.CTkButton(nav, text="♙    จัดการสมาชิก", command=self._show_create_user, **plain_nav)
 
         nav_bottom = ctk.CTkFrame(sidebar, fg_color="transparent"); nav_bottom.pack(fill="x", side="bottom", padx=15, pady=19)
         self.settings_btn = ctk.CTkButton(nav_bottom, text="⚙    ตั้งค่า", command=self._show_settings, **plain_nav)
@@ -1582,7 +1584,11 @@ class WebStyleApp(tk.Tk):
         stats = self.cloud.request("/me/stats")
         self.monthly_purchased = int(stats.get("monthly_purchased", 0))
         self.monthly_success = int(stats.get("monthly_success", 0))
-        self.notice_var.set(f"เข้าสู่ระบบ: {self.cloud_user} • ซื้อเดือนนี้ {self.monthly_purchased} • OTP สำเร็จ {self.monthly_success}")
+        self.daily_limit = int(stats.get("daily_limit", 0) or 0)
+        self.daily_purchased = int(stats.get("daily_purchased", 0) or 0)
+        quota_text = (f" • วันนี้ {self.daily_purchased}/{self.daily_limit} เบอร์"
+                      if self.daily_limit else " • โควตารายวันไม่จำกัด")
+        self.notice_var.set(f"เข้าสู่ระบบ: {self.cloud_user}{quota_text} • OTP สำเร็จเดือนนี้ {self.monthly_success}")
         self._run(self._fetch_history_counts, self._history_counts_loaded)
         if not self.update_checked:
             self.update_checked = True
@@ -1798,67 +1804,184 @@ class WebStyleApp(tk.Tk):
         ttk.Button(footer, text="ปิดหน้าต่าง", command=window.destroy).pack(side="right")
 
     def _show_create_user(self):
-        if self.cloud_role != "admin": return
-        window = tk.Toplevel(self); window.title("สร้างบัญชีผู้ใช้")
-        window.configure(bg="#061321"); window.resizable(False, False); window.transient(self); window.grab_set()
+        if self.cloud_role != "admin":
+            return
+        colors = self.palette
+        window = tk.Toplevel(self); window.title("จัดการสมาชิก • OTP24HR")
+        window.configure(bg=colors["window"]); window.resizable(False, False)
+        window.transient(self); window.grab_set()
         try: window.iconbitmap(resource_path("1.ico"))
         except tk.TclError: pass
-        width, height = 450, 570
+        width, height = 900, 640
         window.geometry(f"{width}x{height}+{self.winfo_x()+(self.winfo_width()-width)//2}+{self.winfo_y()+(self.winfo_height()-height)//2}")
-        panel = tk.Frame(window, bg="#0b1f36", padx=27, pady=23, highlightthickness=1, highlightbackground="#294866")
+        panel = tk.Frame(window, bg=colors["window"], padx=25, pady=22)
+        panel.pack(fill="both", expand=True)
+        header = tk.Frame(panel, bg=colors["window"]); header.pack(fill="x", pady=(0, 15))
+        title_box = tk.Frame(header, bg=colors["window"]); title_box.pack(side="left")
+        tk.Label(title_box, text="จัดการสมาชิก", bg=colors["window"], fg=colors["text"],
+                 font=("Segoe UI", 21, "bold")).pack(anchor="w")
+        tk.Label(title_box, text="แก้ไขบัญชี กำหนดโควตาซื้อต่อวัน และปิดบัญชีสมาชิก",
+                 bg=colors["window"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+        status_var = tk.StringVar(value="กำลังโหลดสมาชิก…")
+        tk.Label(header, textvariable=status_var, bg=colors["window"], fg=colors["muted"],
+                 font=("Segoe UI", 9)).pack(side="right", anchor="s")
+
+        card = tk.Frame(panel, bg=colors["panel"], padx=13, pady=13,
+                        highlightthickness=1, highlightbackground=colors["border"])
+        card.pack(fill="both", expand=True)
+        table_frame = tk.Frame(card, bg=colors["panel"]); table_frame.pack(fill="both", expand=True)
+        columns = ("username", "role", "limit", "today", "month", "created")
+        table = ttk.Treeview(table_frame, columns=columns, show="headings",
+                             style="Report.Treeview", selectmode="browse", height=11)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview,
+                                  style="Dark.Vertical.TScrollbar")
+        table.configure(yscrollcommand=scrollbar.set)
+        definitions = (
+            ("username", "USERNAME", 180, "w"), ("role", "ROLE", 95, "center"),
+            ("limit", "ลิมิต/วัน", 100, "center"), ("today", "ซื้อวันนี้", 100, "center"),
+            ("month", "ซื้อเดือนนี้", 110, "center"), ("created", "สร้างเมื่อ", 185, "center")
+        )
+        for key, title, size, anchor in definitions:
+            table.heading(key, text=title); table.column(key, width=size, anchor=anchor, stretch=key in ("username", "created"))
+        table.pack(side="left", fill="both", expand=True); scrollbar.pack(side="right", fill="y")
+        records = {}
+        current_user_id = {"value": None}
+
+        def selected_record():
+            selected = table.selection()
+            return records.get(selected[0]) if selected else None
+
+        def refresh():
+            try:
+                result = self.cloud.request("/admin/users")
+            except Exception as exc:
+                status_var.set(f"โหลดสมาชิกไม่สำเร็จ: {exc}"); return
+            records.clear(); current_user_id["value"] = str(result.get("current_user_id", ""))
+            for item in table.get_children(): table.delete(item)
+            for record in result.get("users", []):
+                iid = str(record.get("id")); records[iid] = record
+                limit = int(record.get("daily_limit", 0) or 0)
+                table.insert("", "end", iid=iid, values=(
+                    record.get("username", "—"), "Admin" if record.get("role") == "admin" else "User",
+                    f"{limit} เบอร์" if limit else "ไม่จำกัด", record.get("purchased_today", 0),
+                    record.get("purchased_month", 0), str(record.get("created_at") or "—").replace("T", " ")[:16]
+                ))
+            status_var.set(f"สมาชิกที่ใช้งานได้ {len(records)} บัญชี")
+
+        def create_user():
+            self._show_user_editor(window, None, refresh)
+
+        def edit_user(_event=None):
+            record = selected_record()
+            if not record:
+                status_var.set("กรุณาเลือกสมาชิกที่ต้องการแก้ไข"); return
+            if str(record.get("id")) == current_user_id["value"]:
+                status_var.set("บัญชีที่กำลังใช้งานให้เปลี่ยนรหัสผ่านจากเมนูตั้งค่า")
+                return
+            self._show_user_editor(window, record, refresh)
+
+        def delete_user():
+            record = selected_record()
+            if not record:
+                status_var.set("กรุณาเลือกสมาชิกที่ต้องการลบ"); return
+            if str(record.get("id")) == current_user_id["value"]:
+                status_var.set("ไม่สามารถลบบัญชีที่กำลังใช้งานได้"); return
+            username = record.get("username", "—")
+            if not messagebox.askyesno(
+                "ยืนยันลบสมาชิก", f"ต้องการปิดบัญชี {username} ใช่หรือไม่?\n\nสมาชิกจะล็อกอินไม่ได้ แต่ประวัติซื้อเดิมจะไม่ถูกลบ",
+                parent=window
+            ):
+                return
+            try:
+                self.cloud.request(f"/admin/users/{record['id']}", "DELETE")
+            except Exception as exc:
+                status_var.set(f"ลบสมาชิกไม่สำเร็จ: {exc}"); return
+            status_var.set(f"ปิดบัญชี {username} เรียบร้อยแล้ว"); refresh()
+
+        actions = tk.Frame(panel, bg=colors["window"], height=45)
+        actions.pack(fill="x", pady=(14, 0)); actions.pack_propagate(False)
+        ttk.Button(actions, text="＋ สร้างสมาชิก", command=create_user, style="Green.TButton").pack(side="left", fill="y")
+        ttk.Button(actions, text="แก้ไขสมาชิก", command=edit_user).pack(side="left", fill="y", padx=8)
+        ttk.Button(actions, text="ลบสมาชิก", command=delete_user, style="Danger.TButton").pack(side="left", fill="y")
+        ttk.Button(actions, text="รีเฟรช", command=refresh).pack(side="right", fill="y", padx=(8, 0))
+        ttk.Button(actions, text="ปิด", command=window.destroy).pack(side="right", fill="y")
+        table.bind("<Double-1>", edit_user)
+        refresh(); self._apply_dark_palette(window)
+
+    def _show_user_editor(self, parent, record, on_saved):
+        editing = record is not None
+        window = tk.Toplevel(parent); window.title("แก้ไขสมาชิก" if editing else "สร้างสมาชิก")
+        window.configure(bg="#061321"); window.resizable(False, False); window.transient(parent); window.grab_set()
+        try: window.iconbitmap(resource_path("1.ico"))
+        except tk.TclError: pass
+        width, height = 500, 650
+        window.geometry(f"{width}x{height}+{parent.winfo_x()+(parent.winfo_width()-width)//2}+{parent.winfo_y()+(parent.winfo_height()-height)//2}")
+        panel = tk.Frame(window, bg="#0b1f36", padx=28, pady=23,
+                         highlightthickness=1, highlightbackground="#294866")
         panel.pack(fill="both", expand=True, padx=16, pady=16)
-        buttons = tk.Frame(panel, bg="#0b1f36", height=42)
-        buttons.pack(fill="x", side="bottom", pady=(12, 0))
-        buttons.pack_propagate(False)
-        ttk.Button(buttons, text="ปิด", command=window.destroy).pack(side="right", fill="y")
-        tk.Label(panel, text="สร้างบัญชีผู้ใช้", bg="#0b1f36", fg="#eaf6ff",
-                 font=("Segoe UI", 18, "bold")).pack(anchor="w")
-        tk.Label(panel, text="บัญชีใหม่จะสามารถใช้งานโปรแกรมและซื้อเบอร์จากกระเป๋าร่วมได้",
-                 bg="#0b1f36", fg="#8fa9c2", font=("Segoe UI", 9), wraplength=365,
-                 justify="left").pack(anchor="w", pady=(2, 17))
-        username_var, password_var, confirm_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        buttons = tk.Frame(panel, bg="#0b1f36", height=43); buttons.pack(fill="x", side="bottom", pady=(12, 0)); buttons.pack_propagate(False)
+        ttk.Button(buttons, text="ยกเลิก", command=window.destroy).pack(side="right", fill="y")
+        tk.Label(panel, text="แก้ไขรายละเอียดสมาชิก" if editing else "สร้างบัญชีสมาชิก",
+                 bg="#0b1f36", fg="#eaf6ff", font=("Segoe UI", 19, "bold")).pack(anchor="w")
+        tk.Label(panel, text="รหัสผ่านใหม่เว้นว่างได้หากไม่ต้องการเปลี่ยน" if editing else "กำหนดข้อมูลและโควตาการซื้อของสมาชิก",
+                 bg="#0b1f36", fg="#8fa9c2", font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 16))
+        username_var = tk.StringVar(value=str(record.get("username", "")) if editing else "")
+        password_var, confirm_var = tk.StringVar(), tk.StringVar()
+        daily_limit_var = tk.StringVar(value=str(int(record.get("daily_limit", 0) or 0)) if editing else "0")
         entries = []
-        for label, variable, hidden in (("Username", username_var, False), ("Password", password_var, True),
-                                        ("ยืนยัน Password", confirm_var, True)):
+        for label, variable, hidden in (("Username", username_var, False),
+                                        ("รหัสผ่านใหม่" if editing else "Password", password_var, True),
+                                        ("ยืนยันรหัสผ่าน", confirm_var, True)):
             tk.Label(panel, text=label, bg="#0b1f36", fg="#b8cbdd", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(5, 4))
             entry = ttk.Entry(panel, textvariable=variable, show="•" if hidden else "", font=("Segoe UI", 10))
             entry.pack(fill="x", ipady=4); entries.append(entry)
-        tk.Label(panel, text="Role", bg="#0b1f36", fg="#b8cbdd", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(9, 4))
-        role_var = tk.StringVar(value="ผู้ใช้ทั่วไป")
-        role_box = ctk.CTkSegmentedButton(
+        tk.Label(panel, text="Role", bg="#0b1f36", fg="#b8cbdd", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(10, 4))
+        role_var = tk.StringVar(value="ผู้ดูแลระบบ" if editing and record.get("role") == "admin" else "ผู้ใช้ทั่วไป")
+        ctk.CTkSegmentedButton(
             panel, values=["ผู้ใช้ทั่วไป", "ผู้ดูแลระบบ"], variable=role_var,
             height=40, corner_radius=8, fg_color="#0c1222", unselected_color="#0c1222",
             unselected_hover_color="#252047", selected_color="#6d28d9",
-            selected_hover_color="#7c3aed", text_color="#f5f3ff",
-            border_width=1,
-            font=ctk.CTkFont("Leelawadee UI", 12, "bold"))
-        role_box.pack(fill="x")
-        role_hint_var = tk.StringVar(value="ใช้งานและซื้อเบอร์ได้ แต่จัดการผู้ใช้อื่นไม่ได้")
-        tk.Label(panel, textvariable=role_hint_var, bg="#0b1f36", fg="#8fa9c2",
-                 font=("Segoe UI", 8), anchor="w").pack(fill="x", pady=(4, 0))
-        role_var.trace_add("write", lambda *_: role_hint_var.set(
-            "จัดการผู้ใช้ รายงาน และเติมเงินได้" if role_var.get() == "ผู้ดูแลระบบ"
-            else "ใช้งานและซื้อเบอร์ได้ แต่จัดการผู้ใช้อื่นไม่ได้"))
+            selected_hover_color="#7c3aed", text_color="#f5f3ff", border_width=1,
+            font=ctk.CTkFont("Leelawadee UI", 12, "bold")
+        ).pack(fill="x")
+        tk.Label(panel, text="ลิมิตการซื้อต่อวัน", bg="#0b1f36", fg="#b8cbdd",
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(12, 4))
+        ttk.Spinbox(panel, from_=0, to=1000, textvariable=daily_limit_var,
+                    font=("Segoe UI", 10)).pack(fill="x", ipady=4)
+        tk.Label(panel, text="ใส่ 0 = ไม่จำกัด • ระบบนับตามวันประเทศไทย และนับทุกเบอร์ที่ซื้อ",
+                 bg="#0b1f36", fg="#8fa9c2", font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
         status = tk.Label(panel, text="", bg="#0b1f36", fg="#ff7b7b", font=("Segoe UI", 9), anchor="w")
-        status.pack(fill="x", pady=(8, 0))
-        def create():
+        status.pack(fill="x", pady=(9, 0))
+
+        def save():
             username, password = username_var.get().strip(), password_var.get()
             if len(username) < 3:
-                status.configure(text="Username ต้องมีอย่างน้อย 3 ตัวอักษร", fg="#ff7b7b"); return
-            if len(password) < 8:
-                status.configure(text="Password ต้องมีอย่างน้อย 8 ตัวอักษร", fg="#ff7b7b"); return
+                status.configure(text="Username ต้องมีอย่างน้อย 3 ตัวอักษร"); return
+            if (not editing or password) and len(password) < 8:
+                status.configure(text="Password ต้องมีอย่างน้อย 8 ตัวอักษร"); return
             if password != confirm_var.get():
-                status.configure(text="ยืนยัน Password ไม่ตรงกัน", fg="#ff7b7b"); return
-            role = "admin" if role_var.get() == "ผู้ดูแลระบบ" else "user"
-            try: self.cloud.request("/admin/users", "POST", {"username": username, "password": password, "role": role})
+                status.configure(text="ยืนยัน Password ไม่ตรงกัน"); return
+            try:
+                daily_limit = int(daily_limit_var.get())
+            except ValueError:
+                daily_limit = -1
+            if not 0 <= daily_limit <= 1000:
+                status.configure(text="ลิมิตต่อวันต้องเป็นตัวเลข 0–1000"); return
+            payload = {"username": username, "password": password,
+                       "role": "admin" if role_var.get() == "ผู้ดูแลระบบ" else "user",
+                       "daily_limit": daily_limit}
+            try:
+                if editing:
+                    self.cloud.request(f"/admin/users/{record['id']}", "PATCH", payload)
+                else:
+                    self.cloud.request("/admin/users", "POST", payload)
             except Exception as exc:
-                status.configure(text=str(exc), fg="#ff7b7b"); return
-            username_var.set(""); password_var.set(""); confirm_var.set("")
-            status.configure(text=f"สร้างบัญชี {username} ({role}) สำเร็จแล้ว", fg="#58d6ff")
-            messagebox.showinfo("สร้างบัญชีสำเร็จ", f"สร้างบัญชี {username}\nRole: {role}", parent=window)
-        ttk.Button(buttons, text="สร้างบัญชี", command=create, style="Green.TButton").pack(side="right", fill="y", padx=(0, 8))
-        entries[0].focus_set()
-        self._apply_dark_palette(window)
+                status.configure(text=str(exc)); return
+            on_saved(); window.destroy()
+
+        ttk.Button(buttons, text="บันทึกการแก้ไข" if editing else "สร้างบัญชี",
+                   command=save, style="Green.TButton").pack(side="right", fill="y", padx=(0, 8))
+        entries[0].focus_set(); self._apply_dark_palette(window)
 
     def _topup(self):
         if self.cloud_role != "admin": return
@@ -1880,6 +2003,7 @@ class WebStyleApp(tk.Tk):
         self.cloud_user = self.cloud_role = None
         self.user_badge.configure(text="—")
         self.monthly_purchased = self.monthly_success = 0
+        self.daily_limit = self.daily_purchased = 0
         self.history_page = 1
         self.history_total = 0
         self.history_counts = {"success": 0, "all": 0}
@@ -2108,7 +2232,10 @@ class WebStyleApp(tk.Tk):
         self.balance_var.set(f"฿{balance*rate:,.2f}" if rate is not None else f"${balance:.4f}")
         self.stock_var.set(f"คงเหลือ {stock:,} เบอร์")
         rate_text = f" • เรต {rate_date}" if rate_date else ""
-        cloud_stats = f" • OTP สำเร็จเดือนนี้ {self.monthly_success} เบอร์" if self.cloud_user else ""
+        if self.cloud_user and self.daily_limit:
+            cloud_stats = f" • วันนี้ {self.daily_purchased}/{self.daily_limit} เบอร์ • OTP สำเร็จเดือนนี้ {self.monthly_success}"
+        else:
+            cloud_stats = f" • OTP สำเร็จเดือนนี้ {self.monthly_success} เบอร์" if self.cloud_user else ""
         self.notice_var.set(f"พร้อมใช้งาน • อัปเดต {datetime.now().strftime('%H:%M:%S')}{rate_text}{cloud_stats}")
         self.buy_btn.configure(state="normal" if self.quote is not None and stock else "disabled")
 
@@ -2117,7 +2244,7 @@ class WebStyleApp(tk.Tk):
         qty = max(1, min(5, int(self.qty_var.get())))
         if self.cloud:
             try:
-                self.cloud.request("/queue/acquire", "POST", {})
+                self.cloud.request("/queue/acquire", "POST", {"quantity": qty})
             except Exception as exc:
                 messagebox.showwarning("มีผู้ใช้อื่นกำลังซื้อ", str(exc), parent=self); return
         unit_price = (f"฿{self.quote * self.fx_rate:.2f}" if self.fx_rate is not None
@@ -2156,6 +2283,9 @@ class WebStyleApp(tk.Tk):
 
     def _bought(self, result):
         bought, errors = result
+        if bought and self.cloud_user:
+            self.daily_purchased += len(bought)
+            self.monthly_purchased += len(bought)
         for item in bought:
             aid, phone, price = item["aid"], item["phone"], item["price"]
             status = "กำลังรอ SMS…" if not item["ready_error"] else "ซื้อแล้ว • รอตรวจสถานะ"
