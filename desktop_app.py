@@ -13,6 +13,7 @@ import urllib.request
 import webbrowser
 import winsound
 import tkinter as tk
+import customtkinter as ctk
 from tkinter import messagebox, simpledialog, ttk
 from datetime import datetime
 from updater import UpdateManager
@@ -23,7 +24,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.17"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
 
 
@@ -579,19 +580,280 @@ class App(tk.Tk):
         self.destroy()
 
 
+class OrderListView(ctk.CTkFrame):
+    """A rounded, expandable OTP list with the Treeview API used by the app."""
+
+    COLUMNS = ((0, 42, 0), (1, 210, 3), (2, 120, 2), (3, 190, 3), (4, 110, 2), (5, 82, 1))
+
+    def __init__(self, master, on_action=None, on_more=None, **kwargs):
+        super().__init__(master, fg_color="#0b1120", corner_radius=9,
+                         border_width=1, border_color="#2a3451", **kwargs)
+        self._ids = []
+        self._values = {}
+        self._selected = None
+        self._row_widgets = {}
+        self._render_job = None
+        self.on_action = on_action
+        self.on_more = on_more
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        header = ctk.CTkFrame(self, height=48, fg_color="#191d3a", corner_radius=8)
+        header.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
+        header.grid_propagate(False)
+        self._configure_columns(header)
+        for column, text in ((1, "หมายเลข"), (2, "เวลา"), (3, "สถานะ"),
+                             (4, "OTP"), (5, "การทำงาน")):
+            ctk.CTkLabel(header, text=text, text_color="#c1c8dd",
+                         font=ctk.CTkFont("Leelawadee UI", 13, "bold")).grid(
+                             row=0, column=column, sticky="nsew", padx=5)
+
+        self.body = ctk.CTkScrollableFrame(
+            self, fg_color="#0b1120", corner_radius=0,
+            scrollbar_button_color="#303a58", scrollbar_button_hover_color="#465271")
+        self.body.grid(row=1, column=0, sticky="nsew", padx=1, pady=(0, 1))
+        self.body.grid_columnconfigure(0, weight=1)
+
+    def _configure_columns(self, frame):
+        for column, minsize, weight in self.COLUMNS:
+            frame.grid_columnconfigure(column, minsize=minsize, weight=weight)
+        frame.grid_rowconfigure(0, weight=1)
+
+    @staticmethod
+    def _status_style(status):
+        text = str(status)
+        if "ได้รับ OTP" in text:
+            return "#123b32", "#47d6a2"
+        if "หมดเวลา" in text or "ยกเลิก" in text:
+            return "#252a3b", "#aab2c8"
+        if "ตรวจไม่สำเร็จ" in text or "⚠" in text:
+            return "#401d28", "#ff7a8b"
+        if "รอรับ" in text or "ขอ OTP" in text:
+            return "#102e4b", "#56b6ff"
+        return "#3b2c0d", "#f6ad2f"
+
+    def _select(self, iid):
+        if iid not in self._ids:
+            return
+        self._selected = iid
+        self._render()
+        self.event_generate("<<TreeviewSelect>>")
+
+    def _action(self, iid, name):
+        self._selected = iid
+        if self.on_action:
+            self.on_action(name)
+
+    def _more(self, iid, widget):
+        x_root = widget.winfo_rootx() + max(20, widget.winfo_width() - 70)
+        y_root = widget.winfo_rooty() + 42
+        self._selected = iid
+        self._render()
+        if self.on_more:
+            self.on_more(iid, x_root, y_root)
+
+    def _copy(self, value):
+        if not value or value == "—":
+            return
+        self.clipboard_clear(); self.clipboard_append(value)
+
+    def _make_action_bar(self, row, iid):
+        bar = ctk.CTkFrame(row, height=48, fg_color="#10172a", corner_radius=24,
+                           border_width=1, border_color="#3a4564")
+        bar.grid(row=1, column=1, columnspan=5, sticky="ew", padx=(20, 24), pady=(0, 13))
+        bar.grid_propagate(False)
+        bar.grid_rowconfigure(0, weight=1)
+        for index in range(7):
+            bar.grid_columnconfigure(index, weight=1 if index % 2 == 0 else 0)
+        actions = (("↻   ตรวจ OTP", "poll", "#dfe4f5", "#222b44"),
+                   ("▤   ขอ OTP ซ้ำ", "resend", "#dfe4f5", "#222b44"),
+                   ("✓   เสร็จสิ้น", "complete", "#dfe4f5", "#222b44"),
+                   ("⊗   ยกเลิก", "cancel", "#ff646f", "#401d28"))
+        for index, (text, name, color, hover) in enumerate(actions):
+            ctk.CTkButton(bar, text=text, height=36, fg_color="transparent", hover_color=hover,
+                          text_color=color, corner_radius=8, border_width=1 if name == "cancel" else 0,
+                          border_color="#ef4653" if name == "cancel" else "#10172a",
+                          font=ctk.CTkFont("Leelawadee UI", 13, "bold"),
+                          command=lambda n=name: self._action(iid, n)).grid(
+                              row=0, column=index * 2, sticky="ew", padx=8, pady=6)
+            if index < 3:
+                ctk.CTkFrame(bar, width=1, height=28, fg_color="#35405e").grid(
+                    row=0, column=index * 2 + 1, pady=10)
+
+    def _render(self):
+        if self._render_job is not None:
+            try: self.after_cancel(self._render_job)
+            except tk.TclError: pass
+            self._render_job = None
+        for widget in self.body.winfo_children():
+            widget.destroy()
+        self._row_widgets = {}
+        for row_index, iid in enumerate(self._ids):
+            values = list(self._values.get(iid, ()))
+            values += ["—"] * (5 - len(values))
+            phone, remaining, status, code = values[:4]
+            selected = iid == self._selected
+            row = ctk.CTkFrame(
+                self.body, height=130 if selected else 61,
+                fg_color="#121a33" if selected else "#0b1120",
+                corner_radius=9 if selected else 0,
+                border_width=1 if selected else 0,
+                border_color="#8b5cf6")
+            row.grid(row=row_index, column=0, sticky="ew", pady=(0, 1))
+            row.grid_propagate(False); self._configure_columns(row)
+            if selected:
+                row.grid_rowconfigure(1, minsize=61)
+
+            radio = ctk.CTkButton(
+                row, text="●" if selected else "○", width=28, height=28,
+                fg_color="transparent", hover_color="#242d49",
+                text_color="#8b5cf6" if selected else "#9ba6c2",
+                font=ctk.CTkFont("Segoe UI Symbol", 18),
+                command=lambda value=iid: self._select(value))
+            radio.grid(row=0, column=0, padx=(10, 2))
+
+            number = ctk.CTkFrame(row, fg_color="transparent")
+            number.grid(row=0, column=1, sticky="w", padx=6)
+            flag_bg = "#121a33" if selected else "#0b1120"
+            flag = tk.Canvas(number, width=24, height=16, bg=flag_bg, highlightthickness=0)
+            flag.pack(side="left", padx=(1, 3))
+            for y, color in ((1, "#ef3340"), (4, "#ffffff"), (6, "#2d2a8c"),
+                             (10, "#ffffff"), (12, "#ef3340")):
+                height = 5 if y == 6 else (3 if y in (1, 12) else 2)
+                flag.create_rectangle(1, y, 23, y + height, fill=color, outline=color)
+            phone_label = ctk.CTkLabel(number, text=str(phone), text_color="#f1f3f9",
+                                       font=ctk.CTkFont("Segoe UI", 13))
+            phone_label.pack(side="left", padx=(7, 0))
+            phone_label.bind("<Button-1>", lambda _e, value=iid: self._select(value))
+
+            time_label = ctk.CTkLabel(row, text=str(remaining), text_color="#f1f3f9",
+                                      font=ctk.CTkFont("Segoe UI", 13))
+            time_label.grid(row=0, column=2)
+            status_bg, status_fg = self._status_style(status)
+            status_label = ctk.CTkLabel(row, text=str(status), fg_color=status_bg, text_color=status_fg,
+                                        corner_radius=6, height=31,
+                                        font=ctk.CTkFont("Leelawadee UI", 12))
+            status_label.grid(row=0, column=3, padx=12)
+            otp_box = ctk.CTkFrame(row, fg_color="transparent")
+            otp_box.grid(row=0, column=4)
+            code_label = ctk.CTkLabel(otp_box, text=str(code), text_color="#f1f3f9",
+                                      font=ctk.CTkFont("Segoe UI", 13, "bold"))
+            code_label.pack(side="left")
+            if code not in (None, "", "—"):
+                ctk.CTkButton(otp_box, text="▣", width=28, height=28, fg_color="#30235f",
+                              hover_color="#49347f", text_color="#d9ceff", corner_radius=6,
+                              command=lambda value=code: self._copy(value)).pack(side="left", padx=(7, 0))
+            more = ctk.CTkButton(row, text="•••", width=42, height=32, fg_color="transparent",
+                                 hover_color="#242d49", text_color="#aeb7d0",
+                                 command=lambda value=iid, widget=row: self._more(value, widget))
+            more.grid(row=0, column=5)
+            for target in (row, number):
+                target.bind("<Button-1>", lambda _e, value=iid: self._select(value))
+            if selected:
+                self._make_action_bar(row, iid)
+            self._row_widgets[iid] = {
+                "time": time_label, "status": status_label, "code": code_label,
+                "has_copy": code not in (None, "", "—")
+            }
+
+    def _schedule_render(self):
+        if self._render_job is None:
+            self._render_job = self.after_idle(self._render)
+
+    def insert(self, _parent, _index, iid=None, values=()):
+        iid = str(iid if iid is not None else len(self._ids))
+        if iid not in self._ids:
+            self._ids.append(iid)
+        if values:
+            self._values[iid] = tuple(values)
+        else:
+            self._values.setdefault(iid, ())
+        self._schedule_render()
+        return iid
+
+    def item(self, iid, option=None, **kwargs):
+        iid = str(iid)
+        if "values" in kwargs:
+            new_values = tuple(kwargs["values"])
+            old_values = self._values.get(iid, ())
+            self._values[iid] = new_values
+            if iid not in self._ids:
+                self._ids.append(iid)
+            widgets = self._row_widgets.get(iid)
+            if widgets and len(new_values) >= 4:
+                _, remaining, status, code = new_values[:4]
+                has_copy = code not in (None, "", "—")
+                if has_copy != widgets["has_copy"]:
+                    self._schedule_render()
+                else:
+                    if len(old_values) < 2 or old_values[1] != remaining:
+                        widgets["time"].configure(text=str(remaining))
+                    if len(old_values) < 3 or old_values[2] != status:
+                        status_bg, status_fg = self._status_style(status)
+                        widgets["status"].configure(text=str(status), fg_color=status_bg, text_color=status_fg)
+                    if len(old_values) < 4 or old_values[3] != code:
+                        widgets["code"].configure(text=str(code))
+            else:
+                self._schedule_render()
+        values = self._values.get(iid, ())
+        if option == "values":
+            return values
+        return {"values": values}
+
+    def exists(self, iid):
+        return str(iid) in self._ids
+
+    def delete(self, iid):
+        iid = str(iid)
+        if iid in self._ids:
+            self._ids.remove(iid)
+        self._values.pop(iid, None)
+        if self._selected == iid:
+            self._selected = None
+        self._schedule_render()
+
+    def get_children(self, _item=None):
+        return tuple(self._ids)
+
+    def clear(self):
+        self._ids.clear(); self._values.clear(); self._selected = None
+        self._schedule_render()
+
+    def selection(self):
+        return (self._selected,) if self._selected in self._ids else ()
+
+    def selection_set(self, iid):
+        iid = str(iid)
+        if iid in self._ids:
+            self._selected = iid
+            self._render()
+
+    def focus(self, _iid=None):
+        return self._selected
+
+    def identify_row(self, y):
+        for widget, iid in zip(self.body.winfo_children(), self._ids):
+            if widget.winfo_y() <= y < widget.winfo_y() + widget.winfo_height():
+                return iid
+        return ""
+
+
 class WebStyleApp(tk.Tk):
-    """Light, web-style UI with support for up to five simultaneous numbers."""
+    """OTP24HR desktop client with a web-style, dark violet interface."""
 
     def __init__(self):
         super().__init__()
+        # Build the main window while hidden so it never flashes behind Login.
+        self.withdraw()
         self.title(f"OTP24HR by STWIN — v{APP_VERSION}")
         try:
             self.iconbitmap(resource_path("1.ico"))
         except tk.TclError:
             pass
-        width, height = 780, 720
+        width, height = 1280, 800
         self.geometry(f"{width}x{height}+{max(0, (self.winfo_screenwidth()-width)//2)}+{max(0, (self.winfo_screenheight()-height)//2)}")
-        self.resizable(False, False)
+        self.minsize(1040, 680)
+        self.resizable(True, True)
         self.configure(bg="#070510")
         self.jobs = queue.Queue()
         self.quote = self.fx_rate = None
@@ -614,111 +876,532 @@ class WebStyleApp(tk.Tk):
         self._build_ui()
         self.after(100, self._drain_jobs)
         if self.cloud:
-            self.after(150, self._require_login)
+            self.after(80, self._require_login)
+        else:
+            self.after(80, self._show_main_window)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
-    def _build_ui(self):
+    def _build_ui_legacy(self):
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure("TEntry", fieldbackground="#120a24", foreground="#f5f3ff", insertcolor="#ffffff",
-                        padding=8, bordercolor="#7c3aed")
-        style.configure("TButton", font=("Segoe UI", 10, "bold"), padding=(13, 9),
-                        background="#20143d", foreground="#f5f3ff", bordercolor="#5b21b6")
-        style.map("TButton", background=[("active", "#382164"), ("disabled", "#171126")])
-        style.configure("Green.TButton", background="#7c3aed", foreground="#ffffff", bordercolor="#c084fc")
-        style.map("Green.TButton", background=[("active", "#9333ea"), ("disabled", "#2e1a47")])
-        style.configure("Danger.TButton", background="#c33d3d", foreground="#ffffff", bordercolor="#c33d3d")
-        style.configure("Treeview", background="#110a22", fieldbackground="#110a22", foreground="#eee8ff",
-                        rowheight=32, bordercolor="#5b21b6", font=("Segoe UI", 10))
-        style.configure("Treeview.Heading", background="#2e1065", foreground="#f5f3ff",
-                        font=("Segoe UI", 9, "bold"), relief="flat")
-        style.map("Treeview", background=[("selected", "#6d28d9")], foreground=[("selected", "#ffffff")])
-
-        card = tk.Frame(self, bg="#100b20", padx=24, pady=14, highlightthickness=1,
-                        highlightbackground="#6d28d9")
-        card.pack(fill="both", expand=True, padx=24, pady=14)
-        title_row = tk.Frame(card, bg="#ffffff")
-        title_row.pack(fill="x")
-        tk.Label(title_row, text="OTP24HR", bg="#ffffff", fg="#13231a",
-                 font=("Segoe UI", 21, "bold")).pack(side="left")
-        tk.Label(title_row, text=f"v{APP_VERSION}", bg="#20143d", fg="#d8b4fe",
-                 font=("Segoe UI", 9, "bold"), padx=10, pady=4).pack(side="right", pady=(3, 0))
-        tk.Label(card, text="บริการ OTP ประเทศไทย • by STWIN", bg="#ffffff", fg="#617067",
-                 font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 18))
+        palette = {
+            "window": "#070b16", "sidebar": "#090e1c", "panel": "#10162a",
+            "panel_2": "#141a31", "border": "#29324d", "accent": "#7c3aed",
+            "accent_2": "#5b21b6", "text": "#f7f4ff", "muted": "#9da7c3",
+            "success": "#38d39f", "danger": "#ef4444", "warning": "#f59e0b",
+        }
+        self.palette = palette
+        self.configure(bg=palette["window"])
+        style.configure("TEntry", fieldbackground="#0c1222", foreground=palette["text"],
+                        insertcolor="#ffffff", padding=9, bordercolor=palette["border"])
+        style.configure("TSpinbox", fieldbackground="#0c1222", foreground=palette["text"],
+                        arrowcolor=palette["text"], padding=8, bordercolor=palette["border"])
+        style.configure("TButton", font=("Segoe UI", 10, "bold"), padding=(14, 10),
+                        background="#171e35", foreground=palette["text"], bordercolor="#35405f")
+        style.map("TButton", background=[("active", "#222b48"), ("disabled", "#101526")],
+                  foreground=[("disabled", "#59627a")])
+        style.configure("Green.TButton", background=palette["accent"], foreground="#ffffff",
+                        bordercolor="#9b6cff", padding=(20, 11))
+        style.map("Green.TButton", background=[("active", "#8b5cf6"), ("disabled", "#2d2350")])
+        style.configure("Danger.TButton", background="#321523", foreground="#ff7373",
+                        bordercolor=palette["danger"])
+        style.map("Danger.TButton", background=[("active", "#4b1825")])
+        style.configure("Nav.TButton", font=("Segoe UI", 11), padding=(18, 13),
+                        background=palette["sidebar"], foreground=palette["muted"],
+                        borderwidth=0, anchor="w")
+        style.map("Nav.TButton", background=[("active", "#151b31")], foreground=[("active", "#ffffff")])
+        style.configure("NavActive.TButton", font=("Segoe UI", 11, "bold"), padding=(18, 13),
+                        background="#1c1a39", foreground="#ffffff", bordercolor=palette["accent"], anchor="w")
+        style.configure("Tab.TButton", font=("Segoe UI", 10), padding=(12, 7),
+                        background=palette["panel"], foreground=palette["muted"], borderwidth=0)
+        style.configure("TabActive.TButton", font=("Segoe UI", 10, "bold"), padding=(12, 7),
+                        background="#24184a", foreground="#b99aff", bordercolor=palette["accent"])
+        style.configure("Otp.Treeview", background="#0c1222", fieldbackground="#0c1222",
+                        foreground="#e8eaf2", rowheight=43, bordercolor=palette["border"],
+                        font=("Segoe UI", 10))
+        style.configure("Otp.Treeview.Heading", background="#191c39", foreground="#bbc3dc",
+                        font=("Segoe UI", 9, "bold"), relief="flat", padding=(6, 8))
+        style.map("Otp.Treeview", background=[("selected", "#1c2340")],
+                  foreground=[("selected", "#ffffff")])
+        style.map("Otp.Treeview.Heading", background=[("active", "#232746"), ("pressed", "#232746")],
+                  foreground=[("active", "#ffffff")])
+        style.configure("Report.Treeview", background="#0c1222", fieldbackground="#0c1222",
+                        foreground="#e8eaf2", rowheight=38, bordercolor=palette["border"],
+                        font=("Segoe UI", 10), relief="flat")
+        style.configure("Report.Treeview.Heading", background="#191c39", foreground="#bbc3dc",
+                        font=("Segoe UI", 9, "bold"), relief="flat", padding=(8, 9))
+        style.map("Report.Treeview", background=[("selected", "#252c4b")],
+                  foreground=[("selected", "#ffffff")])
+        style.map("Report.Treeview.Heading", background=[("active", "#232746"), ("pressed", "#232746")],
+                  foreground=[("active", "#ffffff")])
+        style.configure("Dark.Vertical.TScrollbar", background="#252c4b", troughcolor="#0c1222",
+                        bordercolor="#29324d", arrowcolor="#bbc3dc", relief="flat", width=14)
+        style.map("Dark.Vertical.TScrollbar", background=[("active", "#384260"), ("pressed", "#4b5678")])
 
         self.key_var = tk.StringVar(value=str(self.saved_settings.get("api_key", "")))
-
-        stats = tk.Frame(card, bg="#ffffff")
-        stats.pack(fill="x", pady=18)
         self.price_var = tk.StringVar(value="—")
         self.balance_var = tk.StringVar(value="—")
-        for col, (label, value) in enumerate((("บริการ", "LINE"), ("ประเทศ", "ไทย 🇹🇭"),
-                                               ("ราคา / คงเหลือ", self.price_var))):
-            box = tk.Frame(stats, bg="#f3f8f4", padx=14, pady=12)
-            box.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 5, 0 if col == 2 else 5))
-            tk.Label(box, text=label, bg="#f3f8f4", fg="#6d7c72", font=("Segoe UI", 9)).pack(anchor="w")
-            if isinstance(value, tk.StringVar):
-                tk.Label(box, textvariable=value, bg="#f3f8f4", fg="#13231a",
-                         font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(3, 0))
-            else:
-                tk.Label(box, text=value, bg="#f3f8f4", fg="#13231a",
-                         font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(3, 0))
-        for i in range(3): stats.grid_columnconfigure(i, weight=1, uniform="stats")
-        tk.Label(card, textvariable=self.balance_var, bg="#ffffff", fg="#617067",
-                 font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 10))
+        self.stock_var = tk.StringVar(value="สินค้า —")
+        self.table_filter = "active"
+        self.search_var = tk.StringVar()
 
-        actions = tk.Frame(card, bg="#ffffff")
-        actions.pack(fill="x")
-        ttk.Button(actions, text="อัปเดตราคา", command=self.refresh).pack(side="left")
-        tk.Label(actions, text="จำนวน", bg="#ffffff", fg="#53675a", font=("Segoe UI", 10)).pack(side="left", padx=(18, 6))
+        shell = tk.Frame(self, bg=palette["window"])
+        shell.pack(fill="both", expand=True)
+        shell.grid_rowconfigure(0, weight=1); shell.grid_columnconfigure(1, weight=1)
+
+        sidebar = tk.Frame(shell, bg=palette["sidebar"], width=205,
+                           highlightthickness=1, highlightbackground="#1f2940")
+        sidebar.grid(row=0, column=0, sticky="nsw"); sidebar.grid_propagate(False)
+        brand = tk.Frame(sidebar, bg=palette["sidebar"], padx=20, pady=25)
+        brand.pack(fill="x")
+        logo = tk.Label(brand, text="24\nHR", bg="#33206f", fg="#b89cff",
+                        font=("Segoe UI", 11, "bold"), width=4, height=2)
+        logo.pack(side="left")
+        brand_text = tk.Frame(brand, bg=palette["sidebar"]); brand_text.pack(side="left", padx=(11, 0))
+        tk.Label(brand_text, text="OTP24HR", bg=palette["sidebar"], fg=palette["text"],
+                 font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        tk.Label(brand_text, text="by STWIN", bg=palette["sidebar"], fg=palette["muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w")
+
+        nav = tk.Frame(sidebar, bg=palette["sidebar"], padx=14, pady=12); nav.pack(fill="x")
+        self.home_nav_btn = ttk.Button(nav, text="⌂   หน้าหลัก", style="NavActive.TButton",
+                                       command=lambda: self._set_table_filter("active"))
+        self.home_nav_btn.pack(fill="x", pady=(0, 5))
+        self.history_nav_btn = ttk.Button(nav, text="↶   ประวัติ OTP", style="Nav.TButton",
+                                          command=lambda: self._set_table_filter("success"))
+        self.history_nav_btn.pack(fill="x", pady=5)
+        self.admin_report_btn = ttk.Button(nav, text="▥   รายงาน", style="Nav.TButton",
+                                           command=self._show_admin_report)
+        self.create_user_btn = ttk.Button(nav, text="♙   ผู้ใช้งาน", style="Nav.TButton",
+                                          command=self._show_create_user)
+
+        nav_bottom = tk.Frame(sidebar, bg=palette["sidebar"], padx=14, pady=18)
+        nav_bottom.pack(fill="x", side="bottom")
+        self.settings_btn = ttk.Button(nav_bottom, text="⚙   ตั้งค่า", style="Nav.TButton",
+                                       command=self._show_settings)
+        self.settings_btn.pack(fill="x", pady=4)
+        self.update_btn = ttk.Button(nav_bottom, text="↥   ตรวจสอบอัปเดต", style="Nav.TButton",
+                                     command=lambda: self._check_for_updates(False))
+        self.update_btn.pack(fill="x", pady=4)
+        self.logout_btn = ttk.Button(nav_bottom, text="↪   ออกจากระบบ", style="Nav.TButton",
+                                     command=self._logout)
+        self.logout_btn.pack(fill="x", pady=4)
+
+        main = tk.Frame(shell, bg=palette["window"], padx=28, pady=20)
+        main.grid(row=0, column=1, sticky="nsew")
+        main.grid_columnconfigure(0, weight=1); main.grid_rowconfigure(4, weight=1)
+
+        header = tk.Frame(main, bg=palette["window"], height=56)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 14)); header.grid_propagate(False)
+        tk.Label(header, text="รายการ OTP", bg=palette["window"], fg=palette["text"],
+                 font=("Segoe UI", 22, "bold")).pack(side="left", anchor="s")
+        tk.Label(header, text=f"v{APP_VERSION}", bg="#171d31", fg="#aeb7d0",
+                 font=("Segoe UI", 9), padx=9, pady=5).pack(side="right", pady=12)
+        self.user_badge = tk.Label(header, text="ผู้ใช้: —", bg=palette["window"], fg=palette["text"],
+                                   font=("Segoe UI", 10, "bold"), padx=17)
+        self.user_badge.pack(side="right")
+        tk.Label(header, text="●  ออนไลน์", bg=palette["window"], fg=palette["success"],
+                 font=("Segoe UI", 9)).pack(side="right")
+
+        balance_strip = tk.Frame(main, bg=palette["panel"], padx=20, pady=15,
+                                 highlightthickness=1, highlightbackground=palette["border"])
+        balance_strip.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        balance_strip.grid_columnconfigure(0, weight=1); balance_strip.grid_columnconfigure(1, weight=1)
+        balance_box = tk.Frame(balance_strip, bg=palette["panel"]); balance_box.grid(row=0, column=0, sticky="w")
+        tk.Label(balance_box, text="▣   ยอดเงินคงเหลือ", bg=palette["panel"], fg=palette["muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(balance_box, textvariable=self.balance_var, bg=palette["panel"], fg=palette["text"],
+                 font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(2, 0))
+        price_box = tk.Frame(balance_strip, bg=palette["panel"]); price_box.grid(row=0, column=1, sticky="w")
+        tk.Label(price_box, text="◇   ราคา / เบอร์", bg=palette["panel"], fg=palette["muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(price_box, textvariable=self.price_var, bg=palette["panel"], fg=palette["text"],
+                 font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(2, 0))
+        self.topup_btn = ttk.Button(balance_strip, text="เติมเงิน  ＋", command=self._topup)
+
+        purchase = tk.Frame(main, bg=palette["panel"], padx=20, pady=14,
+                            highlightthickness=1, highlightbackground=palette["border"])
+        purchase.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        tk.Label(purchase, text="ซื้อหมายเลข", bg=palette["panel"], fg=palette["text"],
+                 font=("Segoe UI", 14, "bold")).pack(side="left")
+        tk.Label(purchase, text="จำนวน", bg=palette["panel"], fg=palette["muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(45, 8))
         self.qty_var = tk.IntVar(value=1)
-        ttk.Spinbox(actions, from_=1, to=5, textvariable=self.qty_var, width=4, justify="center",
+        ttk.Spinbox(purchase, from_=1, to=5, textvariable=self.qty_var, width=4, justify="center",
                     state="readonly", font=("Segoe UI", 10)).pack(side="left")
-        self.buy_btn = ttk.Button(actions, text="ซื้อหมายเลข", command=self.buy, state="disabled", style="Green.TButton")
-        self.buy_btn.pack(side="left", padx=10)
-        management = tk.Frame(card, bg="#ffffff")
-        management.pack(fill="x", pady=(8, 0))
-        self.user_badge = tk.Label(management, text="ผู้ใช้: —", bg="#ffffff", fg="#8fa9c2",
-                                   font=("Segoe UI", 9, "bold"))
-        self.user_badge.pack(side="left")
-        self.admin_report_btn = ttk.Button(management, text="รายงานผู้ใช้", command=self._show_admin_report)
-        self.create_user_btn = ttk.Button(management, text="จัดการผู้ใช้", command=self._show_create_user)
-        self.topup_btn = ttk.Button(management, text="เติมเงิน", command=self._topup)
-        self.settings_btn = ttk.Button(management, text="ตั้งค่า", command=self._show_settings)
-        self.settings_btn.pack(side="right")
-        self.update_btn = ttk.Button(management, text="อัปเดต", command=lambda: self._check_for_updates(False))
-        self.update_btn.pack(side="right", padx=(0, 7))
-        self.logout_btn = ttk.Button(management, text="ออกจากระบบ", command=self._logout)
-        self.logout_btn.pack(side="right", padx=(0, 7))
+        self.buy_btn = ttk.Button(purchase, text="ซื้อหมายเลข", command=self.buy, state="disabled", style="Green.TButton")
+        self.buy_btn.pack(side="left", padx=(18, 0))
+        tk.Label(purchase, textvariable=self.stock_var, bg=palette["panel"], fg=palette["muted"],
+                 font=("Segoe UI", 9)).pack(side="right")
+        self.refresh_btn = ttk.Button(purchase, text="รีเฟรชราคา", command=self.refresh)
+        self.refresh_btn.pack(side="right", padx=(0, 16))
 
         self.notice_var = tk.StringVar(value="กรุณาเข้าสู่ระบบ")
-        self.notice = tk.Label(card, textvariable=self.notice_var, bg="#ffffff", fg="#3b4b40",
-                               font=("Segoe UI", 10), anchor="w", wraplength=650)
-        self.notice.pack(fill="x", pady=(8, 6))
+        self.notice = tk.Label(main, textvariable=self.notice_var, bg=palette["window"], fg=palette["muted"],
+                               font=("Segoe UI", 9), anchor="w")
+        self.notice.grid(row=3, column=0, sticky="ew", pady=(0, 8))
 
-        tk.Frame(card, bg="#294866", height=1).pack(fill="x", pady=(0, 7))
-        tk.Label(card, text="รายการหมายเลข / OTP", bg="#ffffff", fg="#13231a",
-                 font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 7))
-        table_frame = tk.Frame(card, bg="#100b20")
-        table_frame.pack(fill="x")
-        self.table = ttk.Treeview(table_frame, columns=("number", "cost", "time", "status", "code"),
-                                  show="headings", height=5, selectmode="browse")
-        table_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
+        table_card = tk.Frame(main, bg=palette["panel"], padx=18, pady=16,
+                              highlightthickness=1, highlightbackground=palette["border"])
+        table_card.grid(row=4, column=0, sticky="nsew")
+        table_card.grid_columnconfigure(0, weight=1); table_card.grid_rowconfigure(1, weight=1)
+        tools = tk.Frame(table_card, bg=palette["panel"]); tools.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        self.tab_buttons = {}
+        for key, label in (("active", "กำลังใช้งาน"), ("success", "สำเร็จ"), ("all", "ทั้งหมด")):
+            button = ttk.Button(tools, text=label, style="Tab.TButton",
+                                command=lambda value=key: self._set_table_filter(value))
+            button.pack(side="left", padx=(0, 7)); self.tab_buttons[key] = button
+        self.tab_buttons["active"].configure(style="TabActive.TButton")
+        search = ttk.Entry(tools, textvariable=self.search_var, width=27, font=("Segoe UI", 10))
+        search.pack(side="right"); search.insert(0, "")
+        tk.Label(tools, text="ค้นหา", bg=palette["panel"], fg=palette["muted"],
+                 font=("Segoe UI", 9)).pack(side="right", padx=(0, 8))
+        self.search_var.trace_add("write", lambda *_: self._render_orders())
+
+        table_frame = tk.Frame(table_card, bg=palette["panel"])
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.grid_rowconfigure(0, weight=1); table_frame.grid_columnconfigure(0, weight=1)
+        self.table = ttk.Treeview(table_frame, columns=("number", "time", "status", "code", "actions"),
+                                  show="headings", selectmode="browse", style="Otp.Treeview")
+        table_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview,
+                                     style="Dark.Vertical.TScrollbar")
         self.table.configure(yscrollcommand=table_scroll.set)
-        for col, title, width in (("number", "หมายเลข", 160), ("cost", "ราคา", 90),
-                                  ("time", "เวลา", 65), ("status", "สถานะ", 150), ("code", "OTP", 115)):
-            self.table.heading(col, text=title); self.table.column(col, width=width, anchor="center")
-        self.table.pack(side="left", fill="x", expand=True)
-        table_scroll.pack(side="right", fill="y")
+        for col, title, width, stretch in (("number", "หมายเลข", 240, True),
+                                           ("time", "เวลา", 125, False), ("status", "สถานะ", 240, True),
+                                           ("code", "OTP", 120, False), ("actions", "การทำงาน", 90, False)):
+            self.table.heading(col, text=title)
+            self.table.column(col, width=width, minwidth=70, anchor="center", stretch=stretch)
+        self.table.grid(row=0, column=0, sticky="nsew"); table_scroll.grid(row=0, column=1, sticky="ns")
         self.table.bind("<Button-3>", self._show_order_menu)
-        order_actions = tk.Frame(card, bg="#ffffff")
-        order_actions.pack(fill="x", pady=(10, 0))
-        ttk.Button(order_actions, text="ตรวจ OTP ตอนนี้", command=self.poll_selected).pack(side="left")
-        ttk.Button(order_actions, text="ขอ OTP ซ้ำ", command=lambda: self.command_selected("resend")).pack(side="left", padx=(7, 0))
-        ttk.Button(order_actions, text="เสร็จสิ้น", command=lambda: self.command_selected("complete")).pack(side="left", padx=7)
-        ttk.Button(order_actions, text="ยกเลิก", command=lambda: self.command_selected("cancel"),
-                   style="Danger.TButton").pack(side="left")
-        self._apply_dark_palette(card)
+        self.table.bind("<<TreeviewSelect>>", lambda _e: self._update_action_bar())
+        self.table.bind("<Double-1>", self._copy_otp_or_number)
+
+        self.action_bar = tk.Frame(table_card, bg="#0c1222", padx=12, pady=9,
+                                   highlightthickness=1, highlightbackground="#343d5c")
+        self.action_bar.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        self.selection_var = tk.StringVar(value="เลือกรายการเพื่อจัดการ")
+        tk.Label(self.action_bar, textvariable=self.selection_var, bg="#0c1222", fg=palette["muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(4, 18))
+        self.cancel_action_btn = ttk.Button(self.action_bar, text="ยกเลิก", style="Danger.TButton",
+                                             command=lambda: self.command_selected("cancel"))
+        self.cancel_action_btn.pack(side="right")
+        self.complete_action_btn = ttk.Button(self.action_bar, text="เสร็จสิ้น",
+                                               command=lambda: self.command_selected("complete"))
+        self.complete_action_btn.pack(side="right", padx=7)
+        self.resend_action_btn = ttk.Button(self.action_bar, text="ขอ OTP ซ้ำ",
+                                             command=lambda: self.command_selected("resend"))
+        self.resend_action_btn.pack(side="right", padx=(0, 7))
+        self.poll_action_btn = ttk.Button(self.action_bar, text="ตรวจ OTP ตอนนี้", command=self.poll_selected)
+        self.poll_action_btn.pack(side="right", padx=(0, 7))
+        self._update_action_bar()
+
+    def _build_ui(self):
+        ctk.set_appearance_mode("dark")
+        colors = {
+            "window": "#070b16", "sidebar": "#090e1c", "panel": "#10162a",
+            "panel_2": "#141a31", "border": "#29324d", "accent": "#7c3aed",
+            "accent_hover": "#8b5cf6", "text": "#f7f4ff", "muted": "#9da7c3",
+            "success": "#38d39f", "danger": "#ef4653", "warning": "#f59e0b",
+        }
+        self.palette = colors
+        self.configure(bg=colors["window"])
+
+        style = ttk.Style(self); style.theme_use("clam")
+        style.configure("TEntry", fieldbackground="#0c1222", foreground=colors["text"],
+                        insertcolor="#ffffff", padding=9, bordercolor=colors["border"])
+        style.configure("TButton", font=("Leelawadee UI", 10, "bold"), padding=(14, 10),
+                        background="#171e35", foreground=colors["text"], bordercolor="#35405f")
+        style.map("TButton", background=[("active", "#222b48"), ("disabled", "#101526")],
+                  foreground=[("disabled", "#59627a")])
+        style.configure("Green.TButton", background=colors["accent"], foreground="#ffffff",
+                        bordercolor="#9b6cff", padding=(20, 11))
+        style.configure("Report.Treeview", background="#0c1222", fieldbackground="#0c1222",
+                        foreground="#e8eaf2", rowheight=38, bordercolor=colors["border"], font=("Segoe UI", 10))
+        style.configure("Report.Treeview.Heading", background="#191c39", foreground="#bbc3dc",
+                        font=("Leelawadee UI", 9, "bold"), relief="flat", padding=(8, 9))
+        style.map("Report.Treeview", background=[("selected", "#252c4b")], foreground=[("selected", "#ffffff")])
+        style.map("Report.Treeview.Heading", background=[("active", "#232746")], foreground=[("active", "#ffffff")])
+        style.configure("Dark.Vertical.TScrollbar", background="#252c4b", troughcolor="#0c1222",
+                        bordercolor="#29324d", arrowcolor="#bbc3dc", relief="flat", width=14)
+
+        self.key_var = tk.StringVar(value=str(self.saved_settings.get("api_key", "")))
+        self.price_var = tk.StringVar(value="—")
+        self.balance_var = tk.StringVar(value="—")
+        self.stock_var = tk.StringVar(value="คงเหลือ —")
+        self.table_filter = "active"
+        self.search_var = tk.StringVar()
+        self.qty_var = tk.IntVar(value=1)
+        self._last_tab_counts = None
+
+        shell = ctk.CTkFrame(self, fg_color=colors["window"], corner_radius=0)
+        shell.pack(fill="both", expand=True)
+        shell.grid_rowconfigure(0, weight=1); shell.grid_columnconfigure(1, weight=1)
+
+        sidebar = ctk.CTkFrame(shell, width=198, fg_color=colors["sidebar"], corner_radius=0,
+                               border_width=1, border_color="#202943")
+        sidebar.grid(row=0, column=0, sticky="nsw"); sidebar.grid_propagate(False)
+        brand = ctk.CTkFrame(sidebar, fg_color="transparent", height=102)
+        brand.pack(fill="x", padx=22, pady=(18, 8)); brand.pack_propagate(False)
+        ctk.CTkLabel(brand, text="24\nHR", width=44, height=44, corner_radius=7,
+                     fg_color="#34206f", text_color="#a98cff",
+                     font=ctk.CTkFont("Segoe UI", 13, "bold")).pack(side="left")
+        brand_words = ctk.CTkFrame(brand, fg_color="transparent"); brand_words.pack(side="left", padx=(12, 0))
+        ctk.CTkLabel(brand_words, text="OTP24HR", text_color=colors["text"],
+                     font=ctk.CTkFont("Segoe UI", 20, "bold")).pack(anchor="w")
+        ctk.CTkLabel(brand_words, text="by STWIN", text_color=colors["muted"],
+                     font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w")
+
+        nav = ctk.CTkFrame(sidebar, fg_color="transparent"); nav.pack(fill="x", padx=15, pady=(4, 0))
+        nav_font = ctk.CTkFont("Leelawadee UI", 15)
+        active_nav = {"height": 48, "corner_radius": 7, "anchor": "w", "font": nav_font,
+                      "fg_color": "#1a1835", "hover_color": "#252047", "text_color": "#ffffff",
+                      "border_width": 1, "border_color": colors["accent"]}
+        plain_nav = {"height": 48, "corner_radius": 7, "anchor": "w", "font": nav_font,
+                     "fg_color": "transparent", "hover_color": "#151b31", "text_color": "#aeb7cf",
+                     "border_width": 0}
+        self.home_nav_btn = ctk.CTkButton(nav, text="⌂    หน้าหลัก", command=lambda: self._set_table_filter("active"), **active_nav)
+        self.home_nav_btn.pack(fill="x", pady=4)
+        self.history_nav_btn = ctk.CTkButton(nav, text="◷    ประวัติ OTP", command=lambda: self._set_table_filter("success"), **plain_nav)
+        self.history_nav_btn.pack(fill="x", pady=4)
+        self.admin_report_btn = ctk.CTkButton(nav, text="▥    รายงาน", command=self._show_admin_report, **plain_nav)
+        self.create_user_btn = ctk.CTkButton(nav, text="♙    ผู้ใช้งาน", command=self._show_create_user, **plain_nav)
+
+        nav_bottom = ctk.CTkFrame(sidebar, fg_color="transparent"); nav_bottom.pack(fill="x", side="bottom", padx=15, pady=19)
+        self.settings_btn = ctk.CTkButton(nav_bottom, text="⚙    ตั้งค่า", command=self._show_settings, **plain_nav)
+        self.settings_btn.pack(fill="x", pady=3)
+        self.update_btn = ctk.CTkButton(nav_bottom, text="↥    ตรวจสอบอัปเดต",
+                                        command=lambda: self._check_for_updates(False), **plain_nav)
+        self.update_btn.pack(fill="x", pady=3)
+        self.logout_btn = ctk.CTkButton(nav_bottom, text="↪    ออกจากระบบ", command=self._logout, **plain_nav)
+        self.logout_btn.pack(fill="x", pady=3)
+
+        main = ctk.CTkFrame(shell, fg_color=colors["window"], corner_radius=0)
+        main.grid(row=0, column=1, sticky="nsew", padx=28, pady=17)
+        main.grid_columnconfigure(0, weight=1); main.grid_rowconfigure(3, weight=1)
+
+        header = ctk.CTkFrame(main, height=68, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12)); header.grid_propagate(False)
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(header, text="รายการ OTP", text_color=colors["text"], anchor="w",
+                     font=ctk.CTkFont("Leelawadee UI", 25, "bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(header, text="●  ออนไลน์", text_color=colors["success"],
+                     font=ctk.CTkFont("Leelawadee UI", 13)).grid(row=0, column=1, padx=(0, 20))
+        ctk.CTkFrame(header, width=1, height=35, fg_color="#303850").grid(row=0, column=2, padx=(0, 20))
+        profile = tk.Canvas(header, width=42, height=42, bg=colors["window"], highlightthickness=0)
+        profile.grid(row=0, column=3)
+        profile.create_oval(1, 1, 41, 41, fill="#312651", outline="#544477", width=1)
+        profile.create_oval(15, 9, 27, 21, outline="#f1edff", width=2)
+        profile.create_arc(10, 19, 32, 36, start=0, extent=180, style="arc", outline="#f1edff", width=2)
+        self.user_badge = ctk.CTkLabel(header, text="—", text_color=colors["text"],
+                                       font=ctk.CTkFont("Segoe UI", 14, "bold"))
+        self.user_badge.grid(row=0, column=4, padx=(10, 16))
+        ctk.CTkFrame(header, width=1, height=35, fg_color="#303850").grid(row=0, column=5, padx=(0, 16))
+        ctk.CTkLabel(header, text=f"v{APP_VERSION}", width=58, height=28, corner_radius=5,
+                     fg_color="#171d31", text_color="#b6bfd7", font=ctk.CTkFont("Segoe UI", 10)).grid(row=0, column=6)
+
+        balance = ctk.CTkFrame(main, height=85, fg_color=colors["panel"], corner_radius=9,
+                               border_width=1, border_color=colors["border"])
+        balance.grid(row=1, column=0, sticky="ew", pady=(0, 11)); balance.grid_propagate(False)
+        balance.grid_columnconfigure(0, weight=1); balance.grid_columnconfigure(2, weight=1)
+        wallet = ctk.CTkFrame(balance, fg_color="transparent"); wallet.grid(row=0, column=0, sticky="w", padx=21, pady=15)
+        ctk.CTkLabel(wallet, text="▣   ยอดเงินคงเหลือ", text_color=colors["muted"],
+                     font=ctk.CTkFont("Leelawadee UI", 11)).pack(anchor="w")
+        ctk.CTkLabel(wallet, textvariable=self.balance_var, text_color=colors["text"],
+                     font=ctk.CTkFont("Segoe UI", 20, "bold")).pack(anchor="w", pady=(1, 0))
+        ctk.CTkFrame(balance, width=1, height=45, fg_color="#303850").grid(row=0, column=1)
+        price = ctk.CTkFrame(balance, fg_color="transparent"); price.grid(row=0, column=2, sticky="w", padx=28, pady=15)
+        ctk.CTkLabel(price, text="◇   ราคา/เบอร์", text_color=colors["muted"],
+                     font=ctk.CTkFont("Leelawadee UI", 11)).pack(anchor="w")
+        price_line = ctk.CTkFrame(price, fg_color="transparent"); price_line.pack(anchor="w", pady=(1, 0))
+        ctk.CTkLabel(price_line, textvariable=self.price_var, text_color="#c4b5fd",
+                     font=ctk.CTkFont("Segoe UI", 21, "bold")).pack(side="left")
+        ctk.CTkLabel(price_line, textvariable=self.stock_var, text_color="#77819d",
+                     font=ctk.CTkFont("Leelawadee UI", 10)).pack(side="left", padx=(12, 0), pady=(5, 0))
+        self.refresh_btn = ctk.CTkButton(balance, text="↻  อัปเดตราคา", width=118, height=40,
+                                         fg_color="#21183f", hover_color="#302257", text_color="#c8b5ff",
+                                         border_width=1, border_color="#6545a7", corner_radius=7,
+                                         font=ctk.CTkFont("Leelawadee UI", 12, "bold"), command=self.refresh)
+        self.refresh_btn.grid(row=0, column=3, padx=(8, 8), sticky="e")
+        self.topup_btn = ctk.CTkButton(balance, text="เติมเงิน   ＋", width=112, height=40,
+                                       fg_color="transparent", hover_color="#251b48", text_color="#bca4ff",
+                                       border_width=1, border_color=colors["accent"], corner_radius=7,
+                                       font=ctk.CTkFont("Leelawadee UI", 13, "bold"), command=self._topup)
+
+        purchase = ctk.CTkFrame(main, height=87, fg_color=colors["panel"], corner_radius=9,
+                                border_width=1, border_color=colors["border"])
+        purchase.grid(row=2, column=0, sticky="ew", pady=(0, 14)); purchase.grid_propagate(False)
+        purchase.grid_columnconfigure(4, weight=1)
+        ctk.CTkLabel(purchase, text="ซื้อหมายเลข", text_color=colors["text"],
+                     font=ctk.CTkFont("Leelawadee UI", 18, "bold")).grid(row=0, column=0, padx=(20, 45))
+        ctk.CTkLabel(purchase, text="จำนวน", text_color=colors["muted"],
+                     font=ctk.CTkFont("Leelawadee UI", 11)).grid(row=0, column=1, padx=(0, 10))
+        stepper = ctk.CTkFrame(purchase, width=128, height=43, fg_color="#0c1222", corner_radius=7,
+                               border_width=1, border_color="#29324d")
+        stepper.grid(row=0, column=2); stepper.grid_propagate(False)
+        ctk.CTkButton(stepper, text="−", width=41, height=41, fg_color="#171e34", hover_color="#252e49",
+                      corner_radius=6, font=ctk.CTkFont("Segoe UI", 20),
+                      command=lambda: self.qty_var.set(max(1, self.qty_var.get() - 1))).pack(side="left")
+        ctk.CTkLabel(stepper, textvariable=self.qty_var, width=45, text_color=colors["text"],
+                     font=ctk.CTkFont("Segoe UI", 16, "bold")).pack(side="left", fill="y")
+        ctk.CTkButton(stepper, text="+", width=41, height=41, fg_color="#171e34", hover_color="#252e49",
+                      corner_radius=6, font=ctk.CTkFont("Segoe UI", 19),
+                      command=lambda: self.qty_var.set(min(5, self.qty_var.get() + 1))).pack(side="right")
+        ctk.CTkLabel(purchase, text="(1–5)", text_color=colors["muted"],
+                     font=ctk.CTkFont("Segoe UI", 12)).grid(row=0, column=3, padx=12)
+        self.buy_btn = ctk.CTkButton(purchase, text="🛒   ซื้อหมายเลข", width=190, height=48,
+                                     fg_color=colors["accent"], hover_color=colors["accent_hover"],
+                                     text_color="#ffffff", corner_radius=7,
+                                     font=ctk.CTkFont("Leelawadee UI", 15, "bold"),
+                                     command=self.buy, state="disabled")
+        self.buy_btn.grid(row=0, column=4, padx=(10, 35))
+        status_area = ctk.CTkFrame(purchase, fg_color="transparent"); status_area.grid(row=0, column=5, padx=(0, 20))
+        self.notice_var = tk.StringVar(value="กรุณาเข้าสู่ระบบ")
+        self.notice = tk.Label(status_area, textvariable=self.notice_var, bg=colors["panel"], fg="#8f9ab7",
+                               font=("Leelawadee UI", 9), anchor="e", justify="right", wraplength=210)
+        self.notice.pack(anchor="e")
+
+        table_card = ctk.CTkFrame(main, fg_color=colors["panel"], corner_radius=9,
+                                  border_width=1, border_color=colors["border"])
+        table_card.grid(row=3, column=0, sticky="nsew")
+        table_card.grid_columnconfigure(0, weight=1); table_card.grid_rowconfigure(1, weight=1)
+        tools = ctk.CTkFrame(table_card, height=68, fg_color="transparent")
+        tools.grid(row=0, column=0, sticky="ew", padx=20, pady=(4, 0)); tools.grid_propagate(False)
+        tools.grid_columnconfigure(3, weight=1)
+        self.tab_buttons = {}
+        self.tab_underlines = {}
+        for index, (key, label) in enumerate((("active", "กำลังใช้งาน"), ("success", "สำเร็จ"), ("all", "ทั้งหมด"))):
+            active = key == "active"
+            button = ctk.CTkButton(tools, text=label, width=112, height=42, corner_radius=6,
+                                   fg_color="transparent",
+                                   hover_color="#28203f", text_color="#b99aff" if active else colors["muted"],
+                                   border_width=0, border_color=colors["accent"],
+                                   font=ctk.CTkFont("Leelawadee UI", 13, "bold" if active else "normal"),
+                                   command=lambda value=key: self._set_table_filter(value))
+            button.grid(row=0, column=index, padx=(0, 7)); self.tab_buttons[key] = button
+            underline = ctk.CTkFrame(tools, height=2, fg_color=colors["accent"] if active else "transparent",
+                                     corner_radius=0)
+            underline.grid(row=1, column=index, sticky="ew", padx=(4, 11)); self.tab_underlines[key] = underline
+        search = ctk.CTkEntry(tools, textvariable=self.search_var, width=260, height=42,
+                              placeholder_text="ค้นหาเบอร์, OTP...", fg_color="#0b1120",
+                              border_color="#35405d", text_color=colors["text"],
+                              placeholder_text_color="#737d99", corner_radius=7,
+                              font=ctk.CTkFont("Leelawadee UI", 12))
+        search.grid(row=0, column=4, padx=(10, 10))
+        ctk.CTkButton(tools, text="▽  ตัวกรอง", width=110, height=42, fg_color="transparent",
+                      hover_color="#202941", text_color="#b7bfd5", border_width=1,
+                      border_color="#35405d", corner_radius=7,
+                      font=ctk.CTkFont("Leelawadee UI", 12),
+                      command=lambda: self._set_table_filter("all")).grid(row=0, column=5)
+        self.search_var.trace_add("write", lambda *_: self._render_orders())
+
+        self.table = OrderListView(table_card, on_action=self._table_action, on_more=self._show_order_menu_at)
+        self.table.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 7))
+        footer = ctk.CTkFrame(table_card, height=42, fg_color="transparent")
+        footer.grid(row=2, column=0, sticky="ew", padx=22, pady=(0, 8)); footer.grid_propagate(False)
+        footer.grid_columnconfigure(1, weight=1)
+        self.list_summary_var = tk.StringVar(value="แสดง 0 รายการ")
+        ctk.CTkLabel(footer, textvariable=self.list_summary_var, text_color=colors["muted"],
+                     font=ctk.CTkFont("Leelawadee UI", 10)).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(footer, text="หน้า 1 จาก 1", text_color=colors["muted"],
+                     font=ctk.CTkFont("Leelawadee UI", 10)).grid(row=0, column=1)
+        ctk.CTkButton(footer, text="1", width=34, height=31, fg_color="#271a50", hover_color="#382568",
+                      border_width=1, border_color=colors["accent"], corner_radius=6,
+                      font=ctk.CTkFont("Segoe UI", 11)).grid(row=0, column=2)
+
+    def _table_action(self, name):
+        if name == "poll":
+            self.poll_selected()
+        else:
+            self.command_selected(name)
+
+    def _show_order_menu_at(self, iid, x_root, y_root):
+        self.table.selection_set(iid)
+        event = type("PopupEvent", (), {"x_root": x_root, "y_root": y_root, "y": 0})()
+        self._show_order_menu(event, row_override=iid)
+
+    def _set_table_filter(self, value):
+        self.table_filter = value
+        home_active = value != "success"
+        self.home_nav_btn.configure(fg_color="#1a1835" if home_active else "transparent",
+                                    text_color="#ffffff" if home_active else "#aeb7cf",
+                                    border_width=1 if home_active else 0)
+        self.history_nav_btn.configure(fg_color="#1a1835" if not home_active else "transparent",
+                                       text_color="#ffffff" if not home_active else "#aeb7cf",
+                                       border_width=1 if not home_active else 0,
+                                       border_color=self.palette["accent"])
+        for key, button in self.tab_buttons.items():
+            active = key == value
+            button.configure(fg_color="transparent",
+                             text_color="#b99aff" if active else self.palette["muted"],
+                             border_width=0,
+                             border_color=self.palette["accent"])
+            self.tab_underlines[key].configure(fg_color=self.palette["accent"] if active else "transparent")
+        self._render_orders()
+
+    def _order_matches_filter(self, order):
+        completed = order.get("code") not in (None, "", "—") or "ได้รับ OTP" in str(order.get("status", ""))
+        if self.table_filter == "active" and not order.get("active"):
+            return False
+        if self.table_filter == "success" and not completed:
+            return False
+        query = self.search_var.get().strip().lower()
+        return not query or query in " ".join(str(order.get(key, "")) for key in ("phone", "status", "code")).lower()
+
+    def _render_orders(self):
+        if not hasattr(self, "table"):
+            return
+        selected = self._selected_id()
+        if hasattr(self.table, "clear"):
+            self.table.clear()
+        else:
+            for item in self.table.get_children():
+                self.table.delete(item)
+        for aid, order in self.orders.items():
+            if self._order_matches_filter(order):
+                self.table.insert("", "end", iid=aid)
+                self._sync_row(aid)
+        if selected and self.table.exists(selected):
+            self.table.selection_set(selected)
+        self._update_tab_labels()
+        self._update_action_bar()
+        if hasattr(self, "list_summary_var"):
+            count = len(self.table.get_children())
+            self.list_summary_var.set(f"แสดง 1–{count} จาก {count} รายการ" if count else "ไม่มีรายการ")
+
+    def _update_tab_labels(self):
+        if not hasattr(self, "tab_buttons"):
+            return
+        active = sum(1 for order in self.orders.values() if order.get("active"))
+        success = sum(1 for order in self.orders.values()
+                      if order.get("code") not in (None, "", "—") or "ได้รับ OTP" in str(order.get("status", "")))
+        counts = (active, success, len(self.orders))
+        if getattr(self, "_last_tab_counts", None) == counts:
+            return
+        self._last_tab_counts = counts
+        for key, text, count in (("active", "กำลังใช้งาน", active), ("success", "สำเร็จ", success),
+                                 ("all", "ทั้งหมด", len(self.orders))):
+            self.tab_buttons[key].configure(text=f"{text}  {count}")
+
+    def _update_action_bar(self):
+        selected = self._selected_id() if hasattr(self, "table") else None
+        state = "normal" if selected else "disabled"
+        for button in (getattr(self, "poll_action_btn", None), getattr(self, "resend_action_btn", None),
+                       getattr(self, "complete_action_btn", None), getattr(self, "cancel_action_btn", None)):
+            if button:
+                button.configure(state=state)
+        if hasattr(self, "selection_var"):
+            phone = self.orders.get(selected, {}).get("phone") if selected else None
+            self.selection_var.set(f"เลือกแล้ว: {phone}" if phone else "เลือกรายการเพื่อจัดการ")
+
+    def _copy_otp_or_number(self, _event=None):
+        aid = self._selected_id()
+        if not aid:
+            return
+        order = self.orders[aid]
+        value = order.get("code") if order.get("code") not in (None, "", "—") else order.get("phone", "")
+        if value:
+            self.clipboard_clear(); self.clipboard_append(value)
+            self.notice_var.set(f"คัดลอก {value} แล้ว")
 
     def _apply_dark_palette(self, root):
         """Convert the plain Tk parts of the web layout to the original dark-blue palette."""
@@ -743,15 +1426,6 @@ class WebStyleApp(tk.Tk):
             if widget.winfo_children(): self._apply_dark_palette(widget)
 
     def _require_login(self):
-        saved_username = str(self.saved_settings.get("username", ""))
-        saved_password = str(self.saved_settings.get("password", ""))
-        if saved_username and saved_password:
-            try:
-                result = self.cloud.login(saved_username, saved_password)
-                self._login_complete(result)
-                return
-            except Exception:
-                pass
         while not self.cloud_user and self.winfo_exists():
             credentials = self._show_login_dialog()
             if credentials is None:
@@ -767,17 +1441,17 @@ class WebStyleApp(tk.Tk):
                     self.credential_store.save(self.saved_settings)
                 self._login_complete(result)
             except Exception as exc:
-                messagebox.showerror("เข้าสู่ระบบไม่สำเร็จ", str(exc), parent=self)
+                messagebox.showerror("เข้าสู่ระบบไม่สำเร็จ", str(exc))
 
     def _login_complete(self, result):
         self.cloud_user = result["username"]
         self.cloud_role = result.get("role", "user")
         self._switch_user_orders(self.cloud_user)
-        self.user_badge.configure(text=f"ผู้ใช้: {self.cloud_user} • {self.cloud_role}")
+        self.user_badge.configure(text=self.cloud_user)
         if self.cloud_role == "admin":
-            self.admin_report_btn.pack(side="right", padx=(0, 7))
-            self.create_user_btn.pack(side="right", padx=(0, 7))
-            self.topup_btn.pack(side="right", padx=(0, 7))
+            self.admin_report_btn.pack(fill="x", pady=5)
+            self.create_user_btn.pack(fill="x", pady=5)
+            self.topup_btn.grid(row=0, column=4, padx=(0, 18), sticky="e")
         stats = self.cloud.request("/me/stats")
         self.monthly_purchased = int(stats.get("monthly_purchased", 0))
         self.monthly_success = int(stats.get("monthly_success", 0))
@@ -785,6 +1459,15 @@ class WebStyleApp(tk.Tk):
         if not self.update_checked:
             self.update_checked = True
             self.after(1800, lambda: self._check_for_updates(True))
+        self.after_idle(self._show_main_window)
+
+    def _show_main_window(self):
+        if not self.winfo_exists():
+            return
+        self.deiconify(); self.lift(); self.focus_force()
+        if self.cloud_user:
+            # Connect and populate price/balance immediately after Login.
+            self.after(80, self.refresh)
 
     def _check_for_updates(self, silent=False):
         if not silent: self.notice_var.set("กำลังตรวจสอบอัปเดต…")
@@ -823,32 +1506,64 @@ class WebStyleApp(tk.Tk):
         try: report = self.cloud.request("/admin/stats")
         except Exception as exc:
             messagebox.showerror("โหลดรายงานไม่สำเร็จ", str(exc), parent=self); return
-        window = tk.Toplevel(self); window.title("รายงาน OTP รายเดือน")
-        window.configure(bg="#061321"); window.resizable(False, False)
+        colors = self.palette
+        window = tk.Toplevel(self); window.title("รายงานผู้ใช้ • OTP24HR")
+        window.configure(bg=colors["window"]); window.resizable(False, False)
+        window.transient(self); window.grab_set()
         try: window.iconbitmap(resource_path("1.ico"))
         except tk.TclError: pass
-        width, height = 620, 440
+        width, height = 780, 640
         window.geometry(f"{width}x{height}+{self.winfo_x()+(self.winfo_width()-width)//2}+{self.winfo_y()+(self.winfo_height()-height)//2}")
-        panel = tk.Frame(window, bg="#0b1f36", padx=22, pady=18, highlightthickness=1, highlightbackground="#294866")
-        panel.pack(fill="both", expand=True, padx=16, pady=16)
-        tk.Label(panel, text="รายงานผู้ใช้", bg="#0b1f36", fg="#eaf6ff", font=("Segoe UI", 18, "bold")).pack(anchor="w")
-        tk.Label(panel, text=f"สรุปประจำเดือน {report.get('month','—')} • นับเฉพาะรายการที่ได้รับ OTP สำเร็จ",
-                 bg="#0b1f36", fg="#8fa9c2", font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 13))
-        table = ttk.Treeview(panel, columns=("user", "purchased", "success", "last"), show="headings", height=10)
-        for column, title, size in (("user", "Username", 150), ("purchased", "ซื้อทั้งหมด", 100),
-                                    ("success", "ได้รับ OTP", 100), ("last", "สำเร็จล่าสุด", 170)):
-            table.heading(column, text=title); table.column(column, width=size, anchor="center")
-        total = 0
-        for row in report.get("users", []):
-            success = int(row.get("monthly_success", 0)); total += success
+        panel = tk.Frame(window, bg=colors["window"], padx=26, pady=22)
+        panel.pack(fill="both", expand=True)
+
+        header = tk.Frame(panel, bg=colors["window"]); header.pack(fill="x", pady=(0, 16))
+        title_box = tk.Frame(header, bg=colors["window"]); title_box.pack(side="left")
+        tk.Label(title_box, text="รายงานผู้ใช้", bg=colors["window"], fg=colors["text"],
+                 font=("Segoe UI", 21, "bold")).pack(anchor="w")
+        tk.Label(title_box, text=f"สรุปประจำเดือน {report.get('month', '—')} • นับเฉพาะรายการที่ได้รับ OTP สำเร็จ",
+                 bg=colors["window"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+        tk.Label(header, text="รายงานประจำเดือน", bg="#211943", fg="#bda4ff",
+                 font=("Segoe UI", 9, "bold"), padx=12, pady=7).pack(side="right")
+
+        users = list(report.get("users", []))
+        total_purchased = sum(int(row.get("monthly_purchased", 0)) for row in users)
+        total_success = sum(int(row.get("monthly_success", 0)) for row in users)
+        summary = tk.Frame(panel, bg=colors["window"]); summary.pack(fill="x", pady=(0, 14))
+        for index, (label, value, tone) in enumerate((("ผู้ใช้ทั้งหมด", f"{len(users):,} คน", colors["text"]),
+                                                       ("ซื้อทั้งหมด", f"{total_purchased:,} เบอร์", colors["text"]),
+                                                       ("ได้รับ OTP", f"{total_success:,} เบอร์", colors["success"]))):
+            box = tk.Frame(summary, bg=colors["panel"], padx=17, pady=13,
+                           highlightthickness=1, highlightbackground=colors["border"])
+            box.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 6, 0 if index == 2 else 6))
+            tk.Label(box, text=label, bg=colors["panel"], fg=colors["muted"],
+                     font=("Segoe UI", 9)).pack(anchor="w")
+            tk.Label(box, text=value, bg=colors["panel"], fg=tone,
+                     font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(3, 0))
+            summary.grid_columnconfigure(index, weight=1, uniform="summary")
+
+        table_card = tk.Frame(panel, bg=colors["panel"], padx=14, pady=14,
+                              highlightthickness=1, highlightbackground=colors["border"])
+        table_card.pack(fill="both", expand=True)
+        table_frame = tk.Frame(table_card, bg=colors["panel"]); table_frame.pack(fill="both", expand=True)
+        table = ttk.Treeview(table_frame, columns=("user", "purchased", "success", "last"),
+                             show="headings", style="Report.Treeview", selectmode="browse", height=7)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview,
+                                  style="Dark.Vertical.TScrollbar")
+        table.configure(yscrollcommand=scrollbar.set)
+        for column, title, size, stretch in (("user", "USERNAME", 170, True), ("purchased", "ซื้อทั้งหมด", 115, False),
+                                             ("success", "ได้รับ OTP", 115, False), ("last", "สำเร็จล่าสุด", 210, True)):
+            table.heading(column, text=title)
+            table.column(column, width=size, minwidth=90, anchor="center", stretch=stretch)
+        for row in users:
             table.insert("", "end", values=(row.get("username", "—"), row.get("monthly_purchased", 0),
-                                             success, row.get("last_success") or "—"))
-        table.pack(fill="both", expand=True)
-        footer = tk.Frame(panel, bg="#0b1f36"); footer.pack(fill="x", pady=(12, 0))
-        tk.Label(footer, text=f"รวม OTP สำเร็จเดือนนี้: {total:,} เบอร์", bg="#0b1f36", fg="#58d6ff",
-                 font=("Segoe UI", 11, "bold")).pack(side="left")
-        ttk.Button(footer, text="ปิด", command=window.destroy).pack(side="right")
-        self._apply_dark_palette(window)
+                                             row.get("monthly_success", 0), row.get("last_success") or "—"))
+        table.pack(side="left", fill="both", expand=True); scrollbar.pack(side="right", fill="y")
+
+        footer = tk.Frame(panel, bg=colors["window"]); footer.pack(fill="x", pady=(14, 0))
+        tk.Label(footer, text=f"อัปเดตล่าสุด • {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+                 bg=colors["window"], fg=colors["muted"], font=("Segoe UI", 9)).pack(side="left")
+        ttk.Button(footer, text="ปิดหน้าต่าง", command=window.destroy).pack(side="right")
 
     def _show_create_user(self):
         if self.cloud_role != "admin": return
@@ -910,18 +1625,23 @@ class WebStyleApp(tk.Tk):
     def _logout(self):
         if any(order.get("active") for order in self.orders.values()):
             messagebox.showwarning("ยังออกจากระบบไม่ได้", "กรุณาจัดการรายการที่กำลังรอ OTP ให้เสร็จก่อน", parent=self); return
-        if not messagebox.askyesno("ออกจากระบบ", "ต้องการออกจากระบบและลบข้อมูลเข้าสู่ระบบที่จดจำไว้หรือไม่?", parent=self): return
+        if not self._themed_confirm(
+            "ออกจากระบบ",
+            "ต้องการออกจากระบบและลบข้อมูลเข้าสู่ระบบที่จดจำไว้หรือไม่?\n\n"
+            "คุณจะต้องเข้าสู่ระบบใหม่ก่อนใช้งานครั้งถัดไป"
+        ): return
         self.saved_settings.pop("username", None); self.saved_settings.pop("password", None)
         try: self.credential_store.save(self.saved_settings)
         except OSError: pass
         self.cloud = CloudClient(CLOUD_API_URL)
         self.cloud_user = self.cloud_role = None
-        self.user_badge.configure(text="ผู้ใช้: —")
+        self.user_badge.configure(text="—")
         self.monthly_purchased = self.monthly_success = 0
-        self.admin_report_btn.pack_forget(); self.create_user_btn.pack_forget(); self.topup_btn.pack_forget()
+        self.admin_report_btn.pack_forget(); self.create_user_btn.pack_forget(); self.topup_btn.grid_forget()
         for item in self.table.get_children(): self.table.delete(item)
         self.orders.clear()
         self.notice_var.set("ออกจากระบบแล้ว")
+        self.withdraw()
         self.after(100, self._require_login)
 
     def _show_settings(self):
@@ -1008,8 +1728,14 @@ class WebStyleApp(tk.Tk):
         try: dialog.iconbitmap(resource_path("1.ico"))
         except tk.TclError: pass
         width, height = 430, 470
-        dialog.geometry(f"{width}x{height}+{self.winfo_x() + (self.winfo_width()-width)//2}+{self.winfo_y() + (self.winfo_height()-height)//2}")
-        dialog.transient(self); dialog.grab_set()
+        x = max(0, (dialog.winfo_screenwidth() - width) // 2)
+        y = max(0, (dialog.winfo_screenheight() - height) // 2)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        if self.state() != "withdrawn":
+            dialog.transient(self)
+        dialog.attributes("-topmost", True)
+        dialog.after(250, lambda: dialog.winfo_exists() and dialog.attributes("-topmost", False))
+        dialog.grab_set()
         result = {"value": None}
 
         panel = tk.Frame(dialog, bg="#0b1f36", padx=30, pady=25, highlightthickness=1,
@@ -1065,7 +1791,7 @@ class WebStyleApp(tk.Tk):
                    style="Green.TButton").pack(side="right", fill="y", padx=(0, 9))
         dialog.bind("<Escape>", cancel)
         dialog.protocol("WM_DELETE_WINDOW", cancel)
-        username_entry.focus_set()
+        username_entry.focus_force()
         self._apply_dark_palette(dialog)
         self.wait_window(dialog)
         return result["value"]
@@ -1128,12 +1854,13 @@ class WebStyleApp(tk.Tk):
         self.quote = offers[0][0] if offers else None; self.fx_rate = rate; self.offer_rows = offers
         stock = sum(x[1] for x in offers)
         if self.quote is None: self.price_var.set("ไม่มีสินค้า")
-        elif rate is None: self.price_var.set(f"${self.quote:.4f} / {stock:,}")
-        else: self.price_var.set(f"${self.quote:.4f} ≈ ฿{self.quote*rate:.2f} / {stock:,}")
-        thb = "—" if rate is None else f"฿{balance*rate:,.2f}"
-        cloud_stats = f" • OTP เดือนนี้ {self.monthly_success} เบอร์" if self.cloud_user else ""
-        self.balance_var.set(f"ยอดคงเหลือ ${balance:.4f} USD (≈ {thb} THB) • เรต {rate_date or '—'}{cloud_stats}")
-        self.notice_var.set(f"พร้อมใช้งาน • อัปเดต {datetime.now().strftime('%H:%M:%S')}")
+        elif rate is None: self.price_var.set(f"${self.quote:.4f}")
+        else: self.price_var.set(f"฿{self.quote*rate:.2f}")
+        self.balance_var.set(f"฿{balance*rate:,.2f}" if rate is not None else f"${balance:.4f}")
+        self.stock_var.set(f"คงเหลือ {stock:,} เบอร์")
+        rate_text = f" • เรต {rate_date}" if rate_date else ""
+        cloud_stats = f" • OTP สำเร็จเดือนนี้ {self.monthly_success} เบอร์" if self.cloud_user else ""
+        self.notice_var.set(f"พร้อมใช้งาน • อัปเดต {datetime.now().strftime('%H:%M:%S')}{rate_text}{cloud_stats}")
         self.buy_btn.configure(state="normal" if self.quote is not None and stock else "disabled")
 
     def buy(self):
@@ -1144,7 +1871,15 @@ class WebStyleApp(tk.Tk):
                 self.cloud.request("/queue/acquire", "POST", {})
             except Exception as exc:
                 messagebox.showwarning("มีผู้ใช้อื่นกำลังซื้อ", str(exc), parent=self); return
-        if not messagebox.askyesno("ยืนยันการซื้อ", f"ซื้อหมายเลข LINE ประเทศไทย {qty} เบอร์\nราคาเริ่มต้นเบอร์ละ ${self.quote:.4f} ?"):
+        unit_price = (f"฿{self.quote * self.fx_rate:.2f}" if self.fx_rate is not None
+                      else f"${self.quote:.4f}")
+        total_price = (f"฿{self.quote * self.fx_rate * qty:.2f}" if self.fx_rate is not None
+                       else f"${self.quote * qty:.4f}")
+        confirm_message = (f"บริการ                 LINE ประเทศไทย\n"
+                           f"จำนวน                  {qty} เบอร์\n"
+                           f"ราคาเริ่มต้น/เบอร์      {unit_price}\n"
+                           f"ยอดรวมโดยประมาณ        {total_price}")
+        if not self._themed_confirm("ยืนยันการซื้อหมายเลข", confirm_message):
             if self.cloud:
                 try: self.cloud.request("/queue/release", "POST", {})
                 except Exception: pass
@@ -1320,9 +2055,22 @@ class WebStyleApp(tk.Tk):
             pass
 
     def _sync_row(self, aid):
-        order = self.orders[aid]; minutes, seconds = divmod(max(0, order["remaining"]), 60)
-        self.table.item(aid, values=(order["phone"], f"${order['price']:.4f}",
-                                    f"{minutes:02d}:{seconds:02d}", order["status"], order["code"]))
+        if aid not in self.orders:
+            return
+        order = self.orders[aid]
+        visible = self._order_matches_filter(order)
+        if not visible:
+            if self.table.exists(aid):
+                self.table.delete(aid)
+            self._update_tab_labels()
+            self._update_action_bar()
+            return
+        if not self.table.exists(aid):
+            self.table.insert("", "end", iid=aid)
+        minutes, seconds = divmod(max(0, order["remaining"]), 60)
+        self.table.item(aid, values=(order["phone"], f"{minutes:02d}:{seconds:02d}",
+                                    order["status"], order["code"], "•••"))
+        self._update_tab_labels()
 
     def _start_timers(self):
         if self.timer_job is None: self.timer_job = self.after(1000, self._tick)
@@ -1351,8 +2099,8 @@ class WebStyleApp(tk.Tk):
             self.poll_job = self.after(POLL_MS, self._auto_poll)
         else: self.poll_job = None
 
-    def _show_order_menu(self, event):
-        row = self.table.identify_row(event.y)
+    def _show_order_menu(self, event, row_override=None):
+        row = row_override or self.table.identify_row(event.y)
         if not row: return
         self.table.selection_set(row); self.table.focus(row)
         popup = tk.Toplevel(self); popup.overrideredirect(True); popup.configure(bg="#7c3aed")
@@ -1388,20 +2136,35 @@ class WebStyleApp(tk.Tk):
                   lambda _: self.notice_var.set(f"รายงาน {phone} ติดลิมิต {days} วันแล้ว"))
 
     def _themed_confirm(self, title, message):
+        colors = self.palette
         result = {"value": False}; window = tk.Toplevel(self); window.title(title)
-        window.configure(bg="#070510"); window.resizable(False, False); window.transient(self); window.grab_set()
-        width, height = 460, 300
+        window.configure(bg=colors["window"]); window.resizable(False, False); window.transient(self); window.grab_set()
+        try: window.iconbitmap(resource_path("1.ico"))
+        except tk.TclError: pass
+        width, height = 500, 340
         window.geometry(f"{width}x{height}+{self.winfo_x()+(self.winfo_width()-width)//2}+{self.winfo_y()+(self.winfo_height()-height)//2}")
-        panel = tk.Frame(window, bg="#100b20", padx=25, pady=22, highlightthickness=1, highlightbackground="#7c3aed")
-        panel.pack(fill="both", expand=True, padx=14, pady=14)
-        tk.Label(panel, text=title, bg="#100b20", fg="#f5f3ff", font=("Segoe UI", 15, "bold")).pack(anchor="w")
-        buttons = tk.Frame(panel, bg="#100b20", height=42)
-        buttons.pack(fill="x", side="bottom", pady=(12, 0)); buttons.pack_propagate(False)
-        tk.Label(panel, text=message, bg="#100b20", fg="#cfc3e6", font=("Segoe UI", 10),
-                 justify="left", anchor="nw", wraplength=390).pack(fill="both", expand=True, anchor="w", pady=(9, 4))
+        panel = tk.Frame(window, bg=colors["panel"], padx=25, pady=22,
+                         highlightthickness=1, highlightbackground=colors["border"])
+        panel.pack(fill="both", expand=True, padx=18, pady=18)
+        heading = tk.Frame(panel, bg=colors["panel"]); heading.pack(fill="x")
+        tk.Label(heading, text="✓", bg="#2d1d5b", fg="#c4a7ff", font=("Segoe UI", 16, "bold"),
+                 width=3, height=1).pack(side="left")
+        heading_text = tk.Frame(heading, bg=colors["panel"]); heading_text.pack(side="left", padx=(12, 0))
+        tk.Label(heading_text, text=title, bg=colors["panel"], fg=colors["text"],
+                 font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        tk.Label(heading_text, text="โปรดตรวจสอบข้อมูลก่อนยืนยัน", bg=colors["panel"], fg=colors["muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+        details = tk.Frame(panel, bg="#0c1222", padx=17, pady=14,
+                           highlightthickness=1, highlightbackground=colors["border"])
+        details.pack(fill="both", expand=True, pady=(17, 14))
+        tk.Label(details, text=message, bg="#0c1222", fg="#dbe0ef", font=("Segoe UI", 10),
+                 justify="left", anchor="nw", wraplength=400).pack(fill="both", expand=True)
+        buttons = tk.Frame(panel, bg=colors["panel"], height=43)
+        buttons.pack(fill="x", side="bottom"); buttons.pack_propagate(False)
         def finish(value): result["value"] = value; window.destroy()
         ttk.Button(buttons, text="ยกเลิก", command=lambda: finish(False)).pack(side="right", fill="y")
-        ttk.Button(buttons, text="ยืนยัน", command=lambda: finish(True), style="Green.TButton").pack(side="right", fill="y", padx=(0, 8))
+        ttk.Button(buttons, text="ยืนยัน", command=lambda: finish(True), style="Green.TButton").pack(side="right", fill="y", padx=(0, 9))
+        window.bind("<Return>", lambda _e: finish(True)); window.bind("<Escape>", lambda _e: finish(False))
         self.wait_window(window); return result["value"]
 
     def _themed_days_dialog(self):
