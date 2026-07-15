@@ -1,7 +1,7 @@
 {
-  "version": "1.0.17",
-  "download_url": "https://github.com/ntwws/stwin-otp24hr/releases/download/v1.0.17/OTP24HR-by-STWIN-portable.zip",
-  "sha256": "166ebfca1a3e3ee2174d04d2749ba777d3c6c4ae314921f2b0eafc6ffc687d82",
+  "version": "1.0.18",
+  "download_url": "https://github.com/ntwws/stwin-otp24hr/releases/download/v1.0.18/OTP24HR-by-STWIN-portable.zip",
+  "sha256": "00c9b10eb68672badda693d00e9c2b244bf7ccd956cf4ebb9ee7f3335e1056ae",
   "package_type": "zip",
-  "notes": "New dark UI, login-first startup, automatic API refresh, smoother OTP list, and themed dialogs"
+  "notes": "Portable folder build: no temporary DLL extraction"
 }
