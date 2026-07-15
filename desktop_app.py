@@ -24,7 +24,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.24"
+APP_VERSION = "1.0.25"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
 
 
@@ -2568,7 +2568,10 @@ class WebStyleApp(tk.Tk):
         panel = tk.Frame(window, bg=colors["panel"], padx=25, pady=22,
                          highlightthickness=1, highlightbackground=colors["border"])
         panel.pack(fill="both", expand=True, padx=18, pady=18)
-        heading = tk.Frame(panel, bg=colors["panel"]); heading.pack(fill="x")
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(1, weight=1)
+        heading = tk.Frame(panel, bg=colors["panel"])
+        heading.grid(row=0, column=0, sticky="ew")
         tk.Label(heading, text="✓", bg="#2d1d5b", fg="#c4a7ff", font=("Segoe UI", 16, "bold"),
                  width=3, height=1).pack(side="left")
         heading_text = tk.Frame(heading, bg=colors["panel"]); heading_text.pack(side="left", padx=(12, 0))
@@ -2578,11 +2581,11 @@ class WebStyleApp(tk.Tk):
                  font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
         details = tk.Frame(panel, bg="#0c1222", padx=17, pady=14,
                            highlightthickness=1, highlightbackground=colors["border"])
-        details.pack(fill="both", expand=True, pady=(17, 14))
+        details.grid(row=1, column=0, sticky="nsew", pady=(17, 14))
         tk.Label(details, text=message, bg="#0c1222", fg="#dbe0ef", font=("Segoe UI", 10),
                  justify="left", anchor="nw", wraplength=400).pack(fill="both", expand=True)
         buttons = tk.Frame(panel, bg=colors["panel"], height=43)
-        buttons.pack(fill="x", side="bottom"); buttons.pack_propagate(False)
+        buttons.grid(row=2, column=0, sticky="ew"); buttons.grid_propagate(False)
         def finish(value): result["value"] = value; window.destroy()
         ttk.Button(buttons, text="ยกเลิก", command=lambda: finish(False)).pack(side="right", fill="y")
         ttk.Button(buttons, text="ยืนยัน", command=lambda: finish(True), style="Green.TButton").pack(side="right", fill="y", padx=(0, 9))
