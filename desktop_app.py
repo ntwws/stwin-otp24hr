@@ -24,7 +24,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.17"
+APP_VERSION = "1.0.18"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
 
 
@@ -585,7 +585,7 @@ class OrderListView(ctk.CTkFrame):
 
     COLUMNS = ((0, 42, 0), (1, 210, 3), (2, 120, 2), (3, 190, 3), (4, 110, 2), (5, 82, 1))
 
-    def __init__(self, master, on_action=None, on_more=None, **kwargs):
+    def __init__(self, master, on_action=None, on_more=None, on_copy_number=None, **kwargs):
         super().__init__(master, fg_color="#0b1120", corner_radius=9,
                          border_width=1, border_color="#2a3451", **kwargs)
         self._ids = []
@@ -595,6 +595,7 @@ class OrderListView(ctk.CTkFrame):
         self._render_job = None
         self.on_action = on_action
         self.on_more = on_more
+        self.on_copy_number = on_copy_number
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
@@ -635,8 +636,12 @@ class OrderListView(ctk.CTkFrame):
     def _select(self, iid):
         if iid not in self._ids:
             return
+        if iid == self._selected:
+            return
+        previous = self._selected
         self._selected = iid
-        self._render()
+        self._apply_selection_style(previous, False)
+        self._apply_selection_style(iid, True)
         self.event_generate("<<TreeviewSelect>>")
 
     def _action(self, iid, name):
@@ -647,10 +652,14 @@ class OrderListView(ctk.CTkFrame):
     def _more(self, iid, widget):
         x_root = widget.winfo_rootx() + max(20, widget.winfo_width() - 70)
         y_root = widget.winfo_rooty() + 42
-        self._selected = iid
-        self._render()
+        self._select(iid)
         if self.on_more:
             self.on_more(iid, x_root, y_root)
+
+    def _copy_number(self, iid):
+        self._select(iid)
+        if self.on_copy_number:
+            self.on_copy_number(iid)
 
     def _copy(self, value):
         if not value or value == "—":
@@ -679,6 +688,30 @@ class OrderListView(ctk.CTkFrame):
             if index < 3:
                 ctk.CTkFrame(bar, width=1, height=28, fg_color="#35405e").grid(
                     row=0, column=index * 2 + 1, pady=10)
+        return bar
+
+    def _apply_selection_style(self, iid, selected):
+        widgets = self._row_widgets.get(iid)
+        if not widgets:
+            return
+        row = widgets["row"]
+        row.configure(height=130 if selected else 61,
+                      fg_color="#121a33" if selected else "#0b1120",
+                      corner_radius=9 if selected else 0,
+                      border_width=1 if selected else 0)
+        row.grid_rowconfigure(1, minsize=61 if selected else 0)
+        widgets["radio"].configure(text="●" if selected else "○",
+                                   text_color="#8b5cf6" if selected else "#9ba6c2")
+        widgets["flag"].configure(bg="#121a33" if selected else "#0b1120")
+        action_bar = widgets.get("action_bar")
+        if selected and action_bar is None:
+            widgets["action_bar"] = self._make_action_bar(row, iid)
+        elif selected:
+            action_bar.grid()
+        elif action_bar is not None:
+            # Keep the controls cached. Recreating four CTk buttons on every
+            # click was the remaining source of visible selection latency.
+            action_bar.grid_remove()
 
     def _render(self):
         if self._render_job is not None:
@@ -724,7 +757,7 @@ class OrderListView(ctk.CTkFrame):
             phone_label = ctk.CTkLabel(number, text=str(phone), text_color="#f1f3f9",
                                        font=ctk.CTkFont("Segoe UI", 13))
             phone_label.pack(side="left", padx=(7, 0))
-            phone_label.bind("<Button-1>", lambda _e, value=iid: self._select(value))
+            phone_label.bind("<Button-1>", lambda _e, value=iid: self._copy_number(value))
 
             time_label = ctk.CTkLabel(row, text=str(remaining), text_color="#f1f3f9",
                                       font=ctk.CTkFont("Segoe UI", 13))
@@ -749,11 +782,11 @@ class OrderListView(ctk.CTkFrame):
             more.grid(row=0, column=5)
             for target in (row, number):
                 target.bind("<Button-1>", lambda _e, value=iid: self._select(value))
-            if selected:
-                self._make_action_bar(row, iid)
+            action_bar = self._make_action_bar(row, iid) if selected else None
             self._row_widgets[iid] = {
                 "time": time_label, "status": status_label, "code": code_label,
-                "has_copy": code not in (None, "", "—")
+                "has_copy": code not in (None, "", "—"), "row": row,
+                "radio": radio, "flag": flag, "action_bar": action_bar
             }
 
     def _schedule_render(self):
@@ -825,14 +858,14 @@ class OrderListView(ctk.CTkFrame):
     def selection_set(self, iid):
         iid = str(iid)
         if iid in self._ids:
-            self._selected = iid
-            self._render()
+            self._select(iid)
 
     def focus(self, _iid=None):
         return self._selected
 
     def identify_row(self, y):
-        for widget, iid in zip(self.body.winfo_children(), self._ids):
+        for iid, widgets in self._row_widgets.items():
+            widget = widgets["row"]
             if widget.winfo_y() <= y < widget.winfo_y() + widget.winfo_height():
                 return iid
         return ""
@@ -1294,7 +1327,9 @@ class WebStyleApp(tk.Tk):
                       command=lambda: self._set_table_filter("all")).grid(row=0, column=5)
         self.search_var.trace_add("write", lambda *_: self._render_orders())
 
-        self.table = OrderListView(table_card, on_action=self._table_action, on_more=self._show_order_menu_at)
+        self.table = OrderListView(table_card, on_action=self._table_action,
+                                   on_more=self._show_order_menu_at,
+                                   on_copy_number=self._copy_order_number)
         self.table.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 7))
         footer = ctk.CTkFrame(table_card, height=42, fg_color="transparent")
         footer.grid(row=2, column=0, sticky="ew", padx=22, pady=(0, 8)); footer.grid_propagate(False)
@@ -1319,6 +1354,16 @@ class WebStyleApp(tk.Tk):
         event = type("PopupEvent", (), {"x_root": x_root, "y_root": y_root, "y": 0})()
         self._show_order_menu(event, row_override=iid)
 
+    def _copy_order_number(self, iid):
+        order = self.orders.get(iid)
+        if not order:
+            return
+        phone = order.get("phone", "")
+        if phone:
+            self.clipboard_clear()
+            self.clipboard_append(phone)
+            self.notice_var.set(f"คัดลอกหมายเลข {phone} แล้ว")
+
     def _set_table_filter(self, value):
         self.table_filter = value
         home_active = value != "success"
@@ -1340,7 +1385,10 @@ class WebStyleApp(tk.Tk):
 
     def _order_matches_filter(self, order):
         completed = order.get("code") not in (None, "", "—") or "ได้รับ OTP" in str(order.get("status", ""))
-        if self.table_filter == "active" and not order.get("active"):
+        # Keep received OTPs in the working list until the user explicitly
+        # presses "เสร็จสิ้น".  Receiving an OTP stops polling, but must not
+        # move the row away while the user is still copying/using the code.
+        if self.table_filter == "active" and not (order.get("active") or completed):
             return False
         if self.table_filter == "success" and not completed:
             return False
@@ -1371,7 +1419,9 @@ class WebStyleApp(tk.Tk):
     def _update_tab_labels(self):
         if not hasattr(self, "tab_buttons"):
             return
-        active = sum(1 for order in self.orders.values() if order.get("active"))
+        active = sum(1 for order in self.orders.values()
+                     if order.get("active") or order.get("code") not in (None, "", "—")
+                     or "ได้รับ OTP" in str(order.get("status", "")))
         success = sum(1 for order in self.orders.values()
                       if order.get("code") not in (None, "", "—") or "ได้รับ OTP" in str(order.get("status", "")))
         counts = (active, success, len(self.orders))
