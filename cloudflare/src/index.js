@@ -136,20 +136,53 @@ export default {
         return json({ month: new Date().toISOString().slice(0, 7), users: rows.results || [] });
       }
       if (request.method === "GET" && path === "/activations/history") {
-        const requestedLimit = Number(url.searchParams.get("limit") || 200);
+        const requestedLimit = Number(url.searchParams.get("limit") || 25);
         const requestedOffset = Number(url.searchParams.get("offset") || 0);
-        const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.trunc(requestedLimit))) : 200;
+        const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : 25;
         const offset = Number.isFinite(requestedOffset) ? Math.max(0, Math.trunc(requestedOffset)) : 0;
-        const rows = await env.DB.prepare(`
+        const scope = url.searchParams.get("scope") === "success" ? "success" : "all";
+        const search = String(url.searchParams.get("search") || "").trim().slice(0, 80);
+        const conditions = [];
+        const bindings = [];
+        if (scope === "success") conditions.push("a.otp_received_at IS NOT NULL");
+        if (search) {
+          conditions.push("(a.phone_number LIKE ? OR a.phone_mask LIKE ? OR a.otp_code LIKE ? OR u.username LIKE ?)");
+          const pattern = `%${search}%`;
+          bindings.push(pattern, pattern, pattern, pattern);
+        }
+        const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+        const countStatement = env.DB.prepare(`
+          SELECT COUNT(*) total
+          FROM activations a JOIN users u ON u.id=a.user_id
+          ${where}
+        `).bind(...bindings);
+        const rowsStatement = env.DB.prepare(`
           SELECT a.activation_id,
             COALESCE(NULLIF(a.phone_number,''),a.phone_mask) phone,
             a.price,a.purchased_at,a.otp_received_at,a.otp_code,a.status,u.username
           FROM activations a JOIN users u ON u.id=a.user_id
+          ${where}
           ORDER BY a.purchased_at DESC,a.activation_id DESC
           LIMIT ? OFFSET ?
-        `).bind(limit, offset).all();
-        const items = rows.results || [];
-        return json({ items, has_more: items.length === limit, next_offset: offset + items.length });
+        `).bind(...bindings, limit, offset);
+        const totalsStatement = env.DB.prepare(`SELECT COUNT(*) total_all,
+          COUNT(CASE WHEN otp_received_at IS NOT NULL THEN 1 END) total_success
+          FROM activations`);
+        const [countResult, rowsResult, totalsResult] = await env.DB.batch([
+          countStatement, rowsStatement, totalsStatement
+        ]);
+        const items = rowsResult.results || [];
+        const total = Number(countResult.results?.[0]?.total || 0);
+        const totals = totalsResult.results?.[0] || {};
+        return json({
+          items, total, limit, offset, scope,
+          has_more: offset + items.length < total,
+          next_offset: offset + items.length,
+          counts: {
+            all: Number(totals.total_all || 0),
+            success: Number(totals.total_success || 0)
+          }
+        });
       }
       if (request.method === "POST" && path === "/activations/register") {
         const ph = await phoneHash(env, body.phone), mask = maskPhone(body.phone);
