@@ -2,6 +2,7 @@
 
 import os
 import sys
+from PyInstaller.utils.hooks import collect_all
 
 
 vc_runtime = []
@@ -10,15 +11,17 @@ for dll_name in ("vcruntime140.dll", "vcruntime140_1.dll"):
     if os.path.exists(dll_path):
         vc_runtime.append((dll_path, "."))
 
+ctk_datas, ctk_binaries, ctk_hiddenimports = collect_all('customtkinter')
+
 
 a = Analysis(
     ['desktop_app.py'],
     pathex=[],
-    binaries=vc_runtime,
-    datas=[('1.ico', '.'), ('cloud_config.json', '.')],
+    binaries=vc_runtime + ctk_binaries,
+    datas=[('1.ico', '.'), ('cloud_config.json', '.')] + ctk_datas,
     # customtkinter imports this module dynamically. PyInstaller 6 with
     # Python 3.12 does not discover it reliably without an explicit entry.
-    hiddenimports=['tkinter.filedialog'],
+    hiddenimports=['tkinter.filedialog'] + ctk_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

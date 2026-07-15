@@ -28,14 +28,17 @@ jobs:
         shell: pwsh
         run: |
           [IO.File]::WriteAllBytes('1.ico', [Convert]::FromBase64String((Get-Content '1.ico.b64' -Raw)))
-      - run: python -m pip install pyinstaller
+      - name: Install application dependencies
+        run: python -m pip install -r requirements.txt
       - run: python -m PyInstaller --noconfirm HeroLineTH.spec
       - name: Verify required modules are bundled
         shell: pwsh
         run: |
           $contents = pyi-archive_viewer -r -b 'dist/OTP24HR by STWIN/OTP24HR by STWIN.exe'
-          if (-not ($contents | Select-String -SimpleMatch 'tkinter.filedialog')) {
-            throw 'Packaged EXE is missing tkinter.filedialog'
+          foreach ($required in @('customtkinter', 'tkinter.filedialog')) {
+            if (-not ($contents | Select-String -SimpleMatch $required)) {
+              throw "Packaged EXE is missing $required"
+            }
           }
       - name: Prepare release and manifest
         shell: pwsh
