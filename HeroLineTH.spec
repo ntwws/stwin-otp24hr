@@ -16,7 +16,9 @@ a = Analysis(
     pathex=[],
     binaries=vc_runtime,
     datas=[('1.ico', '.'), ('cloud_config.json', '.')],
-    hiddenimports=[],
+    # customtkinter imports this module dynamically. PyInstaller 6 with
+    # Python 3.12 does not discover it reliably without an explicit entry.
+    hiddenimports=['tkinter.filedialog'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
