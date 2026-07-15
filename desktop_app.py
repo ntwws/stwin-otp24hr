@@ -24,7 +24,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.21"
+APP_VERSION = "1.0.22"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
 
 
@@ -908,6 +908,14 @@ class WebStyleApp(tk.Tk):
         self.cloud_role = None
         self.monthly_success = 0
         self.monthly_purchased = 0
+        self.history_page = 1
+        self.history_page_size = 25
+        self.history_total = 0
+        self.history_counts = {"success": 0, "all": 0}
+        self.history_page_ids = []
+        self.history_loading = False
+        self.history_search_job = None
+        self.history_request_id = 0
         self.update_manager = UpdateManager(APP_VERSION, UPDATE_MANIFEST_URL)
         self.update_checked = False
         self.poll_job = self.timer_job = None
@@ -1096,7 +1104,7 @@ class WebStyleApp(tk.Tk):
         search.pack(side="right"); search.insert(0, "")
         tk.Label(tools, text="ค้นหา", bg=palette["panel"], fg=palette["muted"],
                  font=("Segoe UI", 9)).pack(side="right", padx=(0, 8))
-        self.search_var.trace_add("write", lambda *_: self._render_orders())
+        self.search_var.trace_add("write", self._on_search_changed)
 
         table_frame = tk.Frame(table_card, bg=palette["panel"])
         table_frame.grid(row=1, column=0, sticky="nsew")
@@ -1332,7 +1340,7 @@ class WebStyleApp(tk.Tk):
                       border_color="#35405d", corner_radius=7,
                       font=ctk.CTkFont("Leelawadee UI", 12),
                       command=lambda: self._set_table_filter("all")).grid(row=0, column=5)
-        self.search_var.trace_add("write", lambda *_: self._render_orders())
+        self.search_var.trace_add("write", self._on_search_changed)
 
         self.table = OrderListView(table_card, on_action=self._table_action,
                                    on_more=self._show_order_menu_at,
@@ -1344,11 +1352,27 @@ class WebStyleApp(tk.Tk):
         self.list_summary_var = tk.StringVar(value="แสดง 0 รายการ")
         ctk.CTkLabel(footer, textvariable=self.list_summary_var, text_color=colors["muted"],
                      font=ctk.CTkFont("Leelawadee UI", 10)).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(footer, text="หน้า 1 จาก 1", text_color=colors["muted"],
+        self.page_status_var = tk.StringVar(value="หน้า 1 จาก 1")
+        ctk.CTkLabel(footer, textvariable=self.page_status_var, text_color=colors["muted"],
                      font=ctk.CTkFont("Leelawadee UI", 10)).grid(row=0, column=1)
-        ctk.CTkButton(footer, text="1", width=34, height=31, fg_color="#271a50", hover_color="#382568",
-                      border_width=1, border_color=colors["accent"], corner_radius=6,
-                      font=ctk.CTkFont("Segoe UI", 11)).grid(row=0, column=2)
+        self.prev_page_btn = ctk.CTkButton(
+            footer, text="‹", width=34, height=31, fg_color="#171e34", hover_color="#282342",
+            border_width=1, border_color="#35405d", corner_radius=6,
+            font=ctk.CTkFont("Segoe UI", 17), command=lambda: self._change_history_page(-1), state="disabled"
+        )
+        self.prev_page_btn.grid(row=0, column=2, padx=(0, 6))
+        self.current_page_btn = ctk.CTkButton(
+            footer, text="1", width=34, height=31, fg_color="#271a50", hover_color="#382568",
+            border_width=1, border_color=colors["accent"], corner_radius=6,
+            font=ctk.CTkFont("Segoe UI", 11), state="disabled"
+        )
+        self.current_page_btn.grid(row=0, column=3)
+        self.next_page_btn = ctk.CTkButton(
+            footer, text="›", width=34, height=31, fg_color="#171e34", hover_color="#282342",
+            border_width=1, border_color="#35405d", corner_radius=6,
+            font=ctk.CTkFont("Segoe UI", 17), command=lambda: self._change_history_page(1), state="disabled"
+        )
+        self.next_page_btn.grid(row=0, column=4, padx=(6, 0))
 
     def _table_action(self, name):
         if name == "poll":
@@ -1388,7 +1412,30 @@ class WebStyleApp(tk.Tk):
                              border_width=0,
                              border_color=self.palette["accent"])
             self.tab_underlines[key].configure(fg_color=self.palette["accent"] if active else "transparent")
-        self._render_orders()
+        if value in ("success", "all") and self.cloud_user:
+            self._load_history_page(reset=True)
+        else:
+            self._render_orders()
+
+    def _on_search_changed(self, *_):
+        if self.table_filter == "active" or not self.cloud_user:
+            self._render_orders()
+            return
+        if self.history_search_job:
+            try:
+                self.after_cancel(self.history_search_job)
+            except tk.TclError:
+                pass
+        self.history_search_job = self.after(300, lambda: self._load_history_page(reset=True))
+
+    def _change_history_page(self, direction):
+        if self.table_filter not in ("success", "all") or self.history_loading:
+            return
+        pages = max(1, (self.history_total + self.history_page_size - 1) // self.history_page_size)
+        target = min(pages, max(1, self.history_page + direction))
+        if target != self.history_page:
+            self.history_page = target
+            self._load_history_page()
 
     def _order_matches_filter(self, order):
         completed = self._order_is_success(order)
@@ -1417,7 +1464,10 @@ class WebStyleApp(tk.Tk):
         else:
             for item in self.table.get_children():
                 self.table.delete(item)
-        for aid, order in self.orders.items():
+        source = self.orders.items()
+        if self.table_filter in ("success", "all") and self.cloud_user:
+            source = ((aid, self.orders[aid]) for aid in self.history_page_ids if aid in self.orders)
+        for aid, order in source:
             if self._order_matches_filter(order):
                 self.table.insert("", "end", iid=aid)
                 self._sync_row(aid)
@@ -1425,22 +1475,38 @@ class WebStyleApp(tk.Tk):
             self.table.selection_set(selected)
         self._update_tab_labels()
         self._update_action_bar()
-        if hasattr(self, "list_summary_var"):
-            count = len(self.table.get_children())
-            self.list_summary_var.set(f"แสดง 1–{count} จาก {count} รายการ" if count else "ไม่มีรายการ")
+        self._update_pagination()
+
+    def _update_pagination(self):
+        if not hasattr(self, "list_summary_var"):
+            return
+        visible = len(self.table.get_children())
+        paged = self.table_filter in ("success", "all") and bool(self.cloud_user)
+        total = self.history_total if paged else visible
+        pages = max(1, (total + self.history_page_size - 1) // self.history_page_size) if paged else 1
+        page = min(max(1, self.history_page), pages) if paged else 1
+        start = (page - 1) * self.history_page_size + 1 if visible else 0
+        end = start + visible - 1 if visible else 0
+        self.list_summary_var.set(f"แสดง {start}–{end} จาก {total} รายการ" if visible else "ไม่มีรายการ")
+        self.page_status_var.set(f"หน้า {page} จาก {pages}")
+        self.current_page_btn.configure(text=str(page))
+        self.prev_page_btn.configure(state="normal" if paged and page > 1 and not self.history_loading else "disabled")
+        self.next_page_btn.configure(state="normal" if paged and page < pages and not self.history_loading else "disabled")
 
     def _update_tab_labels(self):
         if not hasattr(self, "tab_buttons"):
             return
         active = sum(1 for order in self.orders.values()
                      if order.get("active") or (self._order_is_success(order) and order.get("in_working", False)))
-        success = sum(1 for order in self.orders.values() if self._order_is_success(order))
-        counts = (active, success, len(self.orders))
+        success = self.history_counts.get("success", 0) if self.cloud_user else sum(
+            1 for order in self.orders.values() if self._order_is_success(order))
+        total = self.history_counts.get("all", 0) if self.cloud_user else len(self.orders)
+        counts = (active, success, total)
         if getattr(self, "_last_tab_counts", None) == counts:
             return
         self._last_tab_counts = counts
         for key, text, count in (("active", "กำลังใช้งาน", active), ("success", "สำเร็จ", success),
-                                 ("all", "ทั้งหมด", len(self.orders))):
+                                 ("all", "ทั้งหมด", total)):
             self.tab_buttons[key].configure(text=f"{text}  {count}")
 
     def _update_action_bar(self):
@@ -1517,31 +1583,79 @@ class WebStyleApp(tk.Tk):
         self.monthly_purchased = int(stats.get("monthly_purchased", 0))
         self.monthly_success = int(stats.get("monthly_success", 0))
         self.notice_var.set(f"เข้าสู่ระบบ: {self.cloud_user} • ซื้อเดือนนี้ {self.monthly_purchased} • OTP สำเร็จ {self.monthly_success}")
-        self._run(self._fetch_cloud_history, self._cloud_history_loaded)
+        self._run(self._fetch_history_counts, self._history_counts_loaded)
         if not self.update_checked:
             self.update_checked = True
             self.after(1800, lambda: self._check_for_updates(True))
         self.after_idle(self._show_main_window)
 
-    def _fetch_cloud_history(self):
-        items, offset = [], 0
-        while True:
-            page = self.cloud.request(f"/activations/history?limit=500&offset={offset}")
-            batch = page.get("items", [])
-            if not isinstance(batch, list):
-                break
-            items.extend(batch)
-            if not page.get("has_more") or not batch:
-                break
-            offset = int(page.get("next_offset", offset + len(batch)))
-        return items
+    def _fetch_history_counts(self):
+        return self.cloud.request("/activations/history?scope=all&limit=1&offset=0")
 
-    def _cloud_history_loaded(self, items):
+    def _history_counts_loaded(self, page):
+        counts = page.get("counts", {}) if isinstance(page, dict) else {}
+        self.history_counts = {
+            "success": int(counts.get("success", 0) or 0),
+            "all": int(counts.get("all", 0) or 0)
+        }
+        self._last_tab_counts = None
+        self._update_tab_labels()
+
+    def _load_history_page(self, reset=False):
+        if not self.cloud_user:
+            return
+        if reset:
+            self.history_page = 1
+        self.history_loading = True
+        self.history_request_id += 1
+        request_id = self.history_request_id
+        if hasattr(self.table, "clear"):
+            self.table.clear()
+        else:
+            for item in self.table.get_children():
+                self.table.delete(item)
+        self._update_pagination()
+        self.notice_var.set("กำลังโหลดประวัติ…")
+        scope = "success" if self.table_filter == "success" else "all"
+        search = self.search_var.get().strip()
+        page = self.history_page
+        offset = (page - 1) * self.history_page_size
+        query = urllib.parse.urlencode({
+            "scope": scope, "limit": self.history_page_size,
+            "offset": offset, "search": search
+        })
+        def work():
+            try:
+                return self.cloud.request(f"/activations/history?{query}"), None
+            except Exception as exc:
+                return None, str(exc)
+        self._run(work, lambda result: self._history_page_loaded(
+            result, page, scope, search, request_id))
+
+    def _history_page_loaded(self, result, requested_page, scope, search, request_id):
+        if request_id != self.history_request_id:
+            return
+        self.history_loading = False
+        page, error = result
+        if error:
+            self.notice_var.set(f"โหลดประวัติไม่สำเร็จ: {error}")
+            self._update_pagination()
+            return
+        if (self.table_filter not in ("success", "all")
+                or ("success" if self.table_filter == "success" else "all") != scope
+                or self.search_var.get().strip() != search
+                or self.history_page != requested_page):
+            self._update_pagination()
+            return
+        items = page.get("items", []) if isinstance(page, dict) else []
+        current_ids = []
+        old_page_ids = set(self.history_page_ids)
         for item in items:
             aid = str(item.get("activation_id", ""))
             if not aid:
                 continue
-            if aid in self.orders:
+            current_ids.append(aid)
+            if aid in self.orders and aid not in old_page_ids:
                 self.orders[aid].setdefault("buyer", item.get("username") or self.cloud_user)
                 self.orders[aid].setdefault("purchased_at", item.get("purchased_at") or "")
                 continue
@@ -1558,8 +1672,26 @@ class WebStyleApp(tk.Tk):
                 "buyer": item.get("username") or "—", "purchased_at": item.get("purchased_at") or "",
                 "outcome": "success" if received else state, "cloud_recorded": received
             }
+        for aid in set(self.orders) - set(current_ids):
+            order = self.orders.get(aid)
+            if order and not order.get("active") and not order.get("in_working"):
+                self.orders.pop(aid, None)
+        self.history_page_ids = current_ids
+        self.history_total = int(page.get("total", len(items)) or 0)
+        counts = page.get("counts", {})
+        self.history_counts = {
+            "success": int(counts.get("success", self.history_counts.get("success", 0)) or 0),
+            "all": int(counts.get("all", self.history_counts.get("all", 0)) or 0)
+        }
+        pages = max(1, (self.history_total + self.history_page_size - 1) // self.history_page_size)
+        if self.history_page > pages:
+            self.history_page = pages
+            self._load_history_page()
+            return
+        self._last_tab_counts = None
         self._render_orders()
         self._save_orders()
+        self.notice_var.set(f"โหลดประวัติหน้า {self.history_page} แล้ว • {len(current_ids)} รายการ")
 
     def _show_main_window(self):
         if not self.winfo_exists():
@@ -1748,6 +1880,12 @@ class WebStyleApp(tk.Tk):
         self.cloud_user = self.cloud_role = None
         self.user_badge.configure(text="—")
         self.monthly_purchased = self.monthly_success = 0
+        self.history_page = 1
+        self.history_total = 0
+        self.history_counts = {"success": 0, "all": 0}
+        self.history_page_ids = []
+        self.history_request_id += 1
+        self.history_loading = False
         self.admin_report_btn.pack_forget(); self.create_user_btn.pack_forget(); self.topup_btn.grid_forget()
         for item in self.table.get_children(): self.table.delete(item)
         self.orders.clear()
@@ -2203,7 +2341,8 @@ class WebStyleApp(tk.Tk):
         if aid not in self.orders:
             return
         order = self.orders[aid]
-        visible = self._order_matches_filter(order)
+        paged_history = self.table_filter in ("success", "all") and bool(self.cloud_user)
+        visible = self._order_matches_filter(order) and (not paged_history or aid in self.history_page_ids)
         if not visible:
             if self.table.exists(aid):
                 self.table.delete(aid)
