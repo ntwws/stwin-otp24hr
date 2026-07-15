@@ -24,7 +24,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.23"
+APP_VERSION = "1.0.24"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
 
 
@@ -1816,7 +1816,9 @@ class WebStyleApp(tk.Tk):
         window.geometry(f"{width}x{height}+{self.winfo_x()+(self.winfo_width()-width)//2}+{self.winfo_y()+(self.winfo_height()-height)//2}")
         panel = tk.Frame(window, bg=colors["window"], padx=25, pady=22)
         panel.pack(fill="both", expand=True)
-        header = tk.Frame(panel, bg=colors["window"]); header.pack(fill="x", pady=(0, 15))
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(1, weight=1)
+        header = tk.Frame(panel, bg=colors["window"]); header.grid(row=0, column=0, sticky="ew", pady=(0, 15))
         title_box = tk.Frame(header, bg=colors["window"]); title_box.pack(side="left")
         tk.Label(title_box, text="จัดการสมาชิก", bg=colors["window"], fg=colors["text"],
                  font=("Segoe UI", 21, "bold")).pack(anchor="w")
@@ -1828,7 +1830,7 @@ class WebStyleApp(tk.Tk):
 
         card = tk.Frame(panel, bg=colors["panel"], padx=13, pady=13,
                         highlightthickness=1, highlightbackground=colors["border"])
-        card.pack(fill="both", expand=True)
+        card.grid(row=1, column=0, sticky="nsew")
         table_frame = tk.Frame(card, bg=colors["panel"]); table_frame.pack(fill="both", expand=True)
         columns = ("username", "role", "limit", "today", "month", "created")
         table = ttk.Treeview(table_frame, columns=columns, show="headings",
@@ -1899,7 +1901,7 @@ class WebStyleApp(tk.Tk):
             status_var.set(f"ปิดบัญชี {username} เรียบร้อยแล้ว"); refresh()
 
         actions = tk.Frame(panel, bg=colors["window"], height=45)
-        actions.pack(fill="x", pady=(14, 0)); actions.pack_propagate(False)
+        actions.grid(row=2, column=0, sticky="ew", pady=(14, 0)); actions.grid_propagate(False)
         ttk.Button(actions, text="＋ สร้างสมาชิก", command=create_user, style="Green.TButton").pack(side="left", fill="y")
         ttk.Button(actions, text="แก้ไขสมาชิก", command=edit_user).pack(side="left", fill="y", padx=8)
         ttk.Button(actions, text="ลบสมาชิก", command=delete_user, style="Danger.TButton").pack(side="left", fill="y")
