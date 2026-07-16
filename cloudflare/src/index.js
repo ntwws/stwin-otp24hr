@@ -148,7 +148,11 @@ export default {
         const row = await env.DB.prepare(`SELECT
           COUNT(CASE WHEN purchased_at>=datetime('now','start of month') THEN 1 END) monthly_purchased,
           COUNT(CASE WHEN date(purchased_at,'+7 hours')=date('now','+7 hours') THEN 1 END) daily_purchased,
-          COUNT(CASE WHEN otp_received_at IS NOT NULL AND strftime('%Y-%m',otp_received_at)=strftime('%Y-%m','now') THEN 1 END) monthly_success
+          COUNT(CASE WHEN otp_received_at IS NOT NULL AND strftime('%Y-%m',otp_received_at)=strftime('%Y-%m','now') THEN 1 END) monthly_success,
+          COUNT(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN 1 END) daily_success,
+          MIN(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN datetime(otp_received_at,'+7 hours') END) first_success_today,
+          MAX(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN datetime(otp_received_at,'+7 hours') END) last_success_today,
+          datetime(MIN(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN otp_received_at END),'+7 hours','+1 day') estimated_24h_end
           FROM activations WHERE user_id=?`).bind(user.id).first();
         const dailyLimit = Number(user.daily_limit || 0);
         const dailyPurchased = Number(row?.daily_purchased || 0);
@@ -156,6 +160,11 @@ export default {
           username: user.username,
           monthly_purchased: row?.monthly_purchased || 0,
           monthly_success: row?.monthly_success || 0,
+          daily_success: row?.daily_success || 0,
+          first_success_today: row?.first_success_today || null,
+          last_success_today: row?.last_success_today || null,
+          estimated_24h_end: row?.estimated_24h_end || null,
+          timezone: "Asia/Bangkok",
           daily_limit: dailyLimit,
           daily_purchased: dailyPurchased,
           daily_remaining: dailyLimit > 0 ? Math.max(0, dailyLimit - dailyPurchased) : null
@@ -176,11 +185,15 @@ export default {
           SELECT u.username,
             COUNT(CASE WHEN a.purchased_at >= datetime('now','start of month') THEN 1 END) monthly_purchased,
             COUNT(CASE WHEN a.otp_received_at IS NOT NULL AND strftime('%Y-%m',a.otp_received_at)=strftime('%Y-%m','now') THEN 1 END) monthly_success,
-            MAX(a.otp_received_at) last_success
+            COUNT(CASE WHEN a.otp_received_at IS NOT NULL AND date(a.otp_received_at,'+7 hours')=date('now','+7 hours') THEN 1 END) daily_success,
+            MIN(CASE WHEN a.otp_received_at IS NOT NULL AND date(a.otp_received_at,'+7 hours')=date('now','+7 hours') THEN datetime(a.otp_received_at,'+7 hours') END) first_success_today,
+            MAX(CASE WHEN a.otp_received_at IS NOT NULL AND date(a.otp_received_at,'+7 hours')=date('now','+7 hours') THEN datetime(a.otp_received_at,'+7 hours') END) last_success_today,
+            datetime(MIN(CASE WHEN a.otp_received_at IS NOT NULL AND date(a.otp_received_at,'+7 hours')=date('now','+7 hours') THEN a.otp_received_at END),'+7 hours','+1 day') estimated_24h_end,
+            MAX(CASE WHEN a.otp_received_at IS NOT NULL THEN datetime(a.otp_received_at,'+7 hours') END) last_success
           FROM users u LEFT JOIN activations a ON a.user_id=u.id
           WHERE u.active=1 GROUP BY u.id,u.username ORDER BY monthly_success DESC,u.username
         `).all();
-        return json({ month: new Date().toISOString().slice(0, 7), users: rows.results || [] });
+        return json({ month: new Date().toISOString().slice(0, 7), timezone: "Asia/Bangkok", users: rows.results || [] });
       }
       if (request.method === "GET" && path === "/admin/users") {
         if (user.role !== "admin") return json({ error: "ไม่มีสิทธิ์จัดการผู้ใช้" }, 403);
