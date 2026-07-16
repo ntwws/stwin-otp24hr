@@ -24,8 +24,9 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.25"
+APP_VERSION = "1.0.26"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
+LINE_DAILY_OTP_TARGET = 10
 
 
 def resource_path(filename: str) -> str:
@@ -910,6 +911,10 @@ class WebStyleApp(tk.Tk):
         self.monthly_purchased = 0
         self.daily_limit = 0
         self.daily_purchased = 0
+        self.daily_success = 0
+        self.first_success_today = None
+        self.last_success_today = None
+        self.estimated_24h_end = None
         self.history_page = 1
         self.history_page_size = 25
         self.history_total = 0
@@ -1305,9 +1310,13 @@ class WebStyleApp(tk.Tk):
                                      command=self.buy, state="disabled")
         self.buy_btn.grid(row=0, column=4, padx=(10, 35))
         status_area = ctk.CTkFrame(purchase, fg_color="transparent"); status_area.grid(row=0, column=5, padx=(0, 20))
+        self.daily_otp_var = tk.StringVar(value=f"OTP วันนี้ 0/{LINE_DAILY_OTP_TARGET} • ยังไม่มีรายการสำเร็จ")
+        self.daily_otp = tk.Label(status_area, textvariable=self.daily_otp_var, bg=colors["panel"], fg="#bca4ff",
+                                  font=("Leelawadee UI", 9, "bold"), anchor="e", justify="right", wraplength=250)
+        self.daily_otp.pack(anchor="e", pady=(0, 2))
         self.notice_var = tk.StringVar(value="กรุณาเข้าสู่ระบบ")
         self.notice = tk.Label(status_area, textvariable=self.notice_var, bg=colors["panel"], fg="#8f9ab7",
-                               font=("Leelawadee UI", 9), anchor="e", justify="right", wraplength=210)
+                               font=("Leelawadee UI", 9), anchor="e", justify="right", wraplength=250)
         self.notice.pack(anchor="e")
 
         table_card = ctk.CTkFrame(main, fg_color=colors["panel"], corner_radius=9,
@@ -1582,10 +1591,7 @@ class WebStyleApp(tk.Tk):
             self.create_user_btn.pack(fill="x", pady=5)
             self.topup_btn.grid(row=0, column=4, padx=(0, 18), sticky="e")
         stats = self.cloud.request("/me/stats")
-        self.monthly_purchased = int(stats.get("monthly_purchased", 0))
-        self.monthly_success = int(stats.get("monthly_success", 0))
-        self.daily_limit = int(stats.get("daily_limit", 0) or 0)
-        self.daily_purchased = int(stats.get("daily_purchased", 0) or 0)
+        self._apply_me_stats(stats)
         quota_text = (f" • วันนี้ {self.daily_purchased}/{self.daily_limit} เบอร์"
                       if self.daily_limit else " • โควตารายวันไม่จำกัด")
         self.notice_var.set(f"เข้าสู่ระบบ: {self.cloud_user}{quota_text} • OTP สำเร็จเดือนนี้ {self.monthly_success}")
@@ -1594,6 +1600,35 @@ class WebStyleApp(tk.Tk):
             self.update_checked = True
             self.after(1800, lambda: self._check_for_updates(True))
         self.after_idle(self._show_main_window)
+
+    @staticmethod
+    def _clock_text(value):
+        text = str(value or "").strip().replace("T", " ")
+        if not text:
+            return "—"
+        clock = text.split()[-1]
+        return clock[:5] if ":" in clock else text
+
+    def _daily_otp_summary(self):
+        if self.daily_success <= 0:
+            return f"OTP วันนี้ 0/{LINE_DAILY_OTP_TARGET} • ยังไม่มีรายการสำเร็จ"
+        first = self._clock_text(self.first_success_today)
+        latest = self._clock_text(self.last_success_today)
+        end = self._clock_text(self.estimated_24h_end)
+        return (f"OTP วันนี้ {self.daily_success}/{LINE_DAILY_OTP_TARGET} • เริ่ม {first}\n"
+                f"ล่าสุด {latest} • ครบ 24 ชม.ประมาณ {end}")
+
+    def _apply_me_stats(self, stats):
+        self.monthly_purchased = int(stats.get("monthly_purchased", 0))
+        self.monthly_success = int(stats.get("monthly_success", 0))
+        self.daily_limit = int(stats.get("daily_limit", 0) or 0)
+        self.daily_purchased = int(stats.get("daily_purchased", 0) or 0)
+        self.daily_success = int(stats.get("daily_success", 0) or 0)
+        self.first_success_today = stats.get("first_success_today")
+        self.last_success_today = stats.get("last_success_today")
+        self.estimated_24h_end = stats.get("estimated_24h_end")
+        if hasattr(self, "daily_otp_var"):
+            self.daily_otp_var.set(self._daily_otp_summary())
 
     def _fetch_history_counts(self):
         return self.cloud.request("/activations/history?scope=all&limit=1&offset=0")
@@ -1750,7 +1785,7 @@ class WebStyleApp(tk.Tk):
         window.transient(self); window.grab_set()
         try: window.iconbitmap(resource_path("1.ico"))
         except tk.TclError: pass
-        width, height = 780, 640
+        width, height = 980, 640
         window.geometry(f"{width}x{height}+{self.winfo_x()+(self.winfo_width()-width)//2}+{self.winfo_y()+(self.winfo_height()-height)//2}")
         panel = tk.Frame(window, bg=colors["window"], padx=26, pady=22)
         panel.pack(fill="both", expand=True)
@@ -1759,7 +1794,7 @@ class WebStyleApp(tk.Tk):
         title_box = tk.Frame(header, bg=colors["window"]); title_box.pack(side="left")
         tk.Label(title_box, text="รายงานผู้ใช้", bg=colors["window"], fg=colors["text"],
                  font=("Segoe UI", 21, "bold")).pack(anchor="w")
-        tk.Label(title_box, text=f"สรุปประจำเดือน {report.get('month', '—')} • นับเฉพาะรายการที่ได้รับ OTP สำเร็จ",
+        tk.Label(title_box, text=f"สรุปประจำเดือน {report.get('month', '—')} • เวลาวันนี้อ้างอิงประเทศไทย",
                  bg=colors["window"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
         tk.Label(header, text="รายงานประจำเดือน", bg="#211943", fg="#bda4ff",
                  font=("Segoe UI", 9, "bold"), padx=12, pady=7).pack(side="right")
@@ -1767,13 +1802,15 @@ class WebStyleApp(tk.Tk):
         users = list(report.get("users", []))
         total_purchased = sum(int(row.get("monthly_purchased", 0)) for row in users)
         total_success = sum(int(row.get("monthly_success", 0)) for row in users)
+        total_daily_success = sum(int(row.get("daily_success", 0)) for row in users)
         summary = tk.Frame(panel, bg=colors["window"]); summary.pack(fill="x", pady=(0, 14))
         for index, (label, value, tone) in enumerate((("ผู้ใช้ทั้งหมด", f"{len(users):,} คน", colors["text"]),
                                                        ("ซื้อทั้งหมด", f"{total_purchased:,} เบอร์", colors["text"]),
-                                                       ("ได้รับ OTP", f"{total_success:,} เบอร์", colors["success"]))):
+                                                       ("OTP เดือนนี้", f"{total_success:,} เบอร์", colors["success"]),
+                                                       ("OTP วันนี้", f"{total_daily_success:,} เบอร์", "#bca4ff"))):
             box = tk.Frame(summary, bg=colors["panel"], padx=17, pady=13,
                            highlightthickness=1, highlightbackground=colors["border"])
-            box.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 6, 0 if index == 2 else 6))
+            box.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 5, 0 if index == 3 else 5))
             tk.Label(box, text=label, bg=colors["panel"], fg=colors["muted"],
                      font=("Segoe UI", 9)).pack(anchor="w")
             tk.Label(box, text=value, bg=colors["panel"], fg=tone,
@@ -1784,18 +1821,21 @@ class WebStyleApp(tk.Tk):
                               highlightthickness=1, highlightbackground=colors["border"])
         table_card.pack(fill="both", expand=True)
         table_frame = tk.Frame(table_card, bg=colors["panel"]); table_frame.pack(fill="both", expand=True)
-        table = ttk.Treeview(table_frame, columns=("user", "purchased", "success", "last"),
+        table = ttk.Treeview(table_frame, columns=("user", "purchased", "success", "today", "first", "latest"),
                              show="headings", style="Report.Treeview", selectmode="browse", height=7)
         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview,
                                   style="Dark.Vertical.TScrollbar")
         table.configure(yscrollcommand=scrollbar.set)
-        for column, title, size, stretch in (("user", "USERNAME", 170, True), ("purchased", "ซื้อทั้งหมด", 115, False),
-                                             ("success", "ได้รับ OTP", 115, False), ("last", "สำเร็จล่าสุด", 210, True)):
+        for column, title, size, stretch in (("user", "USERNAME", 150, True), ("purchased", "ซื้อเดือนนี้", 105, False),
+                                             ("success", "OTP เดือนนี้", 105, False), ("today", "OTP วันนี้", 90, False),
+                                             ("first", "OTP แรกวันนี้", 120, False), ("latest", "OTP ล่าสุดวันนี้", 120, False)):
             table.heading(column, text=title)
             table.column(column, width=size, minwidth=90, anchor="center", stretch=stretch)
         for row in users:
             table.insert("", "end", values=(row.get("username", "—"), row.get("monthly_purchased", 0),
-                                             row.get("monthly_success", 0), row.get("last_success") or "—"))
+                                             row.get("monthly_success", 0), row.get("daily_success", 0),
+                                             self._clock_text(row.get("first_success_today")),
+                                             self._clock_text(row.get("last_success_today"))))
         table.pack(side="left", fill="both", expand=True); scrollbar.pack(side="right", fill="y")
 
         footer = tk.Frame(panel, bg=colors["window"]); footer.pack(fill="x", pady=(14, 0))
@@ -2006,6 +2046,9 @@ class WebStyleApp(tk.Tk):
         self.user_badge.configure(text="—")
         self.monthly_purchased = self.monthly_success = 0
         self.daily_limit = self.daily_purchased = 0
+        self.daily_success = 0
+        self.first_success_today = self.last_success_today = self.estimated_24h_end = None
+        self.daily_otp_var.set(self._daily_otp_summary())
         self.history_page = 1
         self.history_total = 0
         self.history_counts = {"success": 0, "all": 0}
@@ -2024,8 +2067,7 @@ class WebStyleApp(tk.Tk):
         try: stats = self.cloud.request("/me/stats")
         except Exception as exc:
             messagebox.showerror("โหลดข้อมูลไม่สำเร็จ", str(exc), parent=self); return
-        self.monthly_purchased = int(stats.get("monthly_purchased", 0))
-        self.monthly_success = int(stats.get("monthly_success", 0))
+        self._apply_me_stats(stats)
         window = tk.Toplevel(self); window.title("ตั้งค่า")
         window.configure(bg="#061321"); window.resizable(False, False)
         try: window.iconbitmap(resource_path("1.ico"))
@@ -2402,6 +2444,7 @@ class WebStyleApp(tk.Tk):
         if not self.orders[aid].get("cloud_recorded"):
             self.orders[aid]["cloud_recorded"] = True
             self.monthly_success += 1
+        self._run(lambda: self.cloud.request("/me/stats"), self._apply_me_stats)
         self._save_orders()
 
     def _record_cloud_status(self, aid, status):
