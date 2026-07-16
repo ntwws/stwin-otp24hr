@@ -24,9 +24,8 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.26"
+APP_VERSION = "1.0.27"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
-LINE_DAILY_OTP_TARGET = 10
 
 
 def resource_path(filename: str) -> str:
@@ -1310,7 +1309,7 @@ class WebStyleApp(tk.Tk):
                                      command=self.buy, state="disabled")
         self.buy_btn.grid(row=0, column=4, padx=(10, 35))
         status_area = ctk.CTkFrame(purchase, fg_color="transparent"); status_area.grid(row=0, column=5, padx=(0, 20))
-        self.daily_otp_var = tk.StringVar(value=f"OTP วันนี้ 0/{LINE_DAILY_OTP_TARGET} • ยังไม่มีรายการสำเร็จ")
+        self.daily_otp_var = tk.StringVar(value="วันนี้ยังไม่มี OTP สำเร็จ")
         self.daily_otp = tk.Label(status_area, textvariable=self.daily_otp_var, bg=colors["panel"], fg="#bca4ff",
                                   font=("Leelawadee UI", 9, "bold"), anchor="e", justify="right", wraplength=250)
         self.daily_otp.pack(anchor="e", pady=(0, 2))
@@ -1611,11 +1610,11 @@ class WebStyleApp(tk.Tk):
 
     def _daily_otp_summary(self):
         if self.daily_success <= 0:
-            return f"OTP วันนี้ 0/{LINE_DAILY_OTP_TARGET} • ยังไม่มีรายการสำเร็จ"
+            return "วันนี้ยังไม่มี OTP สำเร็จ"
         first = self._clock_text(self.first_success_today)
         latest = self._clock_text(self.last_success_today)
         end = self._clock_text(self.estimated_24h_end)
-        return (f"OTP วันนี้ {self.daily_success}/{LINE_DAILY_OTP_TARGET} • เริ่ม {first}\n"
+        return (f"OTP แรกวันนี้ {first}\n"
                 f"ล่าสุด {latest} • ครบ 24 ชม.ประมาณ {end}")
 
     def _apply_me_stats(self, stats):
