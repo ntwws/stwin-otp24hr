@@ -24,7 +24,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.27"
+APP_VERSION = "1.0.28"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
 
 
@@ -913,7 +913,11 @@ class WebStyleApp(tk.Tk):
         self.daily_success = 0
         self.first_success_today = None
         self.last_success_today = None
+        self.latest_cycle_date = None
+        self.first_success_latest_cycle = None
+        self.last_success_latest_cycle = None
         self.estimated_24h_end = None
+        self.server_now_bangkok = None
         self.history_page = 1
         self.history_page_size = 25
         self.history_total = 0
@@ -1309,7 +1313,7 @@ class WebStyleApp(tk.Tk):
                                      command=self.buy, state="disabled")
         self.buy_btn.grid(row=0, column=4, padx=(10, 35))
         status_area = ctk.CTkFrame(purchase, fg_color="transparent"); status_area.grid(row=0, column=5, padx=(0, 20))
-        self.daily_otp_var = tk.StringVar(value="วันนี้ยังไม่มี OTP สำเร็จ")
+        self.daily_otp_var = tk.StringVar(value="ยังไม่มีประวัติ OTP สำเร็จ")
         self.daily_otp = tk.Label(status_area, textvariable=self.daily_otp_var, bg=colors["panel"], fg="#bca4ff",
                                   font=("Leelawadee UI", 9, "bold"), anchor="e", justify="right", wraplength=250)
         self.daily_otp.pack(anchor="e", pady=(0, 2))
@@ -1608,14 +1612,35 @@ class WebStyleApp(tk.Tk):
         clock = text.split()[-1]
         return clock[:5] if ":" in clock else text
 
+    @staticmethod
+    def _short_date(value):
+        try:
+            return datetime.fromisoformat(str(value).replace("T", " ")).strftime("%d/%m")
+        except (TypeError, ValueError):
+            return "—"
+
+    @staticmethod
+    def _cloud_datetime(value):
+        try:
+            return datetime.fromisoformat(str(value).replace("T", " "))
+        except (TypeError, ValueError):
+            return None
+
     def _daily_otp_summary(self):
-        if self.daily_success <= 0:
-            return "วันนี้ยังไม่มี OTP สำเร็จ"
-        first = self._clock_text(self.first_success_today)
-        latest = self._clock_text(self.last_success_today)
+        if not self.first_success_latest_cycle:
+            return "ยังไม่มีประวัติ OTP สำเร็จ"
+        cycle = self._short_date(self.latest_cycle_date)
+        first = self._clock_text(self.first_success_latest_cycle)
+        latest = self._clock_text(self.last_success_latest_cycle)
         end = self._clock_text(self.estimated_24h_end)
-        return (f"OTP แรกวันนี้ {first}\n"
-                f"ล่าสุด {latest} • ครบ 24 ชม.ประมาณ {end}")
+        end_date = self._short_date(self.estimated_24h_end)
+        server_now = self._cloud_datetime(self.server_now_bangkok)
+        window_end = self._cloud_datetime(self.estimated_24h_end)
+        if server_now and window_end and server_now >= window_end:
+            next_text = "ครบ 24 ชม.แล้ว • เริ่มรอบใหม่ได้"
+        else:
+            next_text = f"เริ่มรอบใหม่ประมาณ {end_date} {end}"
+        return f"รอบล่าสุด {cycle}: {first}–{latest}\n{next_text}"
 
     def _apply_me_stats(self, stats):
         self.monthly_purchased = int(stats.get("monthly_purchased", 0))
@@ -1625,7 +1650,13 @@ class WebStyleApp(tk.Tk):
         self.daily_success = int(stats.get("daily_success", 0) or 0)
         self.first_success_today = stats.get("first_success_today")
         self.last_success_today = stats.get("last_success_today")
+        self.latest_cycle_date = stats.get("latest_cycle_date") or self.first_success_today
+        self.first_success_latest_cycle = (stats.get("first_success_latest_cycle")
+                                           or self.first_success_today)
+        self.last_success_latest_cycle = (stats.get("last_success_latest_cycle")
+                                          or self.last_success_today)
         self.estimated_24h_end = stats.get("estimated_24h_end")
+        self.server_now_bangkok = stats.get("server_now_bangkok")
         if hasattr(self, "daily_otp_var"):
             self.daily_otp_var.set(self._daily_otp_summary())
 
@@ -1793,7 +1824,7 @@ class WebStyleApp(tk.Tk):
         title_box = tk.Frame(header, bg=colors["window"]); title_box.pack(side="left")
         tk.Label(title_box, text="รายงานผู้ใช้", bg=colors["window"], fg=colors["text"],
                  font=("Segoe UI", 21, "bold")).pack(anchor="w")
-        tk.Label(title_box, text=f"สรุปประจำเดือน {report.get('month', '—')} • เวลาวันนี้อ้างอิงประเทศไทย",
+        tk.Label(title_box, text=f"สรุปประจำเดือน {report.get('month', '—')} • รอบ OTP ล่าสุดยังแสดงต่อหลังข้ามวัน",
                  bg=colors["window"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
         tk.Label(header, text="รายงานประจำเดือน", bg="#211943", fg="#bda4ff",
                  font=("Segoe UI", 9, "bold"), padx=12, pady=7).pack(side="right")
@@ -1820,21 +1851,21 @@ class WebStyleApp(tk.Tk):
                               highlightthickness=1, highlightbackground=colors["border"])
         table_card.pack(fill="both", expand=True)
         table_frame = tk.Frame(table_card, bg=colors["panel"]); table_frame.pack(fill="both", expand=True)
-        table = ttk.Treeview(table_frame, columns=("user", "purchased", "success", "today", "first", "latest"),
+        table = ttk.Treeview(table_frame, columns=("user", "purchased", "success", "cycle", "first", "latest"),
                              show="headings", style="Report.Treeview", selectmode="browse", height=7)
         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview,
                                   style="Dark.Vertical.TScrollbar")
         table.configure(yscrollcommand=scrollbar.set)
         for column, title, size, stretch in (("user", "USERNAME", 150, True), ("purchased", "ซื้อเดือนนี้", 105, False),
-                                             ("success", "OTP เดือนนี้", 105, False), ("today", "OTP วันนี้", 90, False),
-                                             ("first", "OTP แรกวันนี้", 120, False), ("latest", "OTP ล่าสุดวันนี้", 120, False)):
+                                             ("success", "OTP เดือนนี้", 105, False), ("cycle", "รอบล่าสุด", 90, False),
+                                             ("first", "เวลาเริ่ม", 120, False), ("latest", "เวลาสิ้นสุด", 120, False)):
             table.heading(column, text=title)
             table.column(column, width=size, minwidth=90, anchor="center", stretch=stretch)
         for row in users:
             table.insert("", "end", values=(row.get("username", "—"), row.get("monthly_purchased", 0),
-                                             row.get("monthly_success", 0), row.get("daily_success", 0),
-                                             self._clock_text(row.get("first_success_today")),
-                                             self._clock_text(row.get("last_success_today"))))
+                                             row.get("monthly_success", 0), self._short_date(row.get("latest_cycle_date")),
+                                             self._clock_text(row.get("first_success_latest_cycle")),
+                                             self._clock_text(row.get("last_success_latest_cycle"))))
         table.pack(side="left", fill="both", expand=True); scrollbar.pack(side="right", fill="y")
 
         footer = tk.Frame(panel, bg=colors["window"]); footer.pack(fill="x", pady=(14, 0))
@@ -2046,7 +2077,10 @@ class WebStyleApp(tk.Tk):
         self.monthly_purchased = self.monthly_success = 0
         self.daily_limit = self.daily_purchased = 0
         self.daily_success = 0
-        self.first_success_today = self.last_success_today = self.estimated_24h_end = None
+        self.first_success_today = self.last_success_today = None
+        self.latest_cycle_date = None
+        self.first_success_latest_cycle = self.last_success_latest_cycle = None
+        self.estimated_24h_end = self.server_now_bangkok = None
         self.daily_otp_var.set(self._daily_otp_summary())
         self.history_page = 1
         self.history_total = 0

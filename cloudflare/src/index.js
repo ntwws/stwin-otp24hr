@@ -145,15 +145,25 @@ export default {
       }
 
       if (request.method === "GET" && path === "/me/stats") {
-        const row = await env.DB.prepare(`SELECT
+        const row = await env.DB.prepare(`WITH user_activations AS (
+          SELECT * FROM activations WHERE user_id=?
+        ), latest_cycle AS (
+          SELECT MAX(date(otp_received_at,'+7 hours')) cycle_date
+          FROM user_activations WHERE otp_received_at IS NOT NULL
+        ) SELECT
           COUNT(CASE WHEN purchased_at>=datetime('now','start of month') THEN 1 END) monthly_purchased,
           COUNT(CASE WHEN date(purchased_at,'+7 hours')=date('now','+7 hours') THEN 1 END) daily_purchased,
           COUNT(CASE WHEN otp_received_at IS NOT NULL AND strftime('%Y-%m',otp_received_at)=strftime('%Y-%m','now') THEN 1 END) monthly_success,
           COUNT(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN 1 END) daily_success,
           MIN(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN datetime(otp_received_at,'+7 hours') END) first_success_today,
           MAX(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN datetime(otp_received_at,'+7 hours') END) last_success_today,
-          datetime(MIN(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN otp_received_at END),'+7 hours','+1 day') estimated_24h_end
-          FROM activations WHERE user_id=?`).bind(user.id).first();
+          (SELECT cycle_date FROM latest_cycle) latest_cycle_date,
+          COUNT(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=(SELECT cycle_date FROM latest_cycle) THEN 1 END) latest_cycle_success,
+          MIN(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=(SELECT cycle_date FROM latest_cycle) THEN datetime(otp_received_at,'+7 hours') END) first_success_latest_cycle,
+          MAX(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=(SELECT cycle_date FROM latest_cycle) THEN datetime(otp_received_at,'+7 hours') END) last_success_latest_cycle,
+          datetime(MIN(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=(SELECT cycle_date FROM latest_cycle) THEN otp_received_at END),'+7 hours','+1 day') estimated_24h_end,
+          datetime('now','+7 hours') server_now_bangkok
+          FROM user_activations`).bind(user.id).first();
         const dailyLimit = Number(user.daily_limit || 0);
         const dailyPurchased = Number(row?.daily_purchased || 0);
         return json({
@@ -163,7 +173,12 @@ export default {
           daily_success: row?.daily_success || 0,
           first_success_today: row?.first_success_today || null,
           last_success_today: row?.last_success_today || null,
+          latest_cycle_date: row?.latest_cycle_date || null,
+          latest_cycle_success: row?.latest_cycle_success || 0,
+          first_success_latest_cycle: row?.first_success_latest_cycle || null,
+          last_success_latest_cycle: row?.last_success_latest_cycle || null,
           estimated_24h_end: row?.estimated_24h_end || null,
+          server_now_bangkok: row?.server_now_bangkok || null,
           timezone: "Asia/Bangkok",
           daily_limit: dailyLimit,
           daily_purchased: dailyPurchased,
@@ -182,18 +197,36 @@ export default {
       if (request.method === "GET" && path === "/admin/stats") {
         if (user.role !== "admin") return json({ error: "ไม่มีสิทธิ์ดูรายงาน" }, 403);
         const rows = await env.DB.prepare(`
+          WITH activation_days AS (
+            SELECT user_id,date(otp_received_at,'+7 hours') cycle_date,COUNT(*) cycle_success,
+              MIN(datetime(otp_received_at,'+7 hours')) first_success,
+              MAX(datetime(otp_received_at,'+7 hours')) last_success,
+              datetime(MIN(otp_received_at),'+7 hours','+1 day') estimated_24h_end
+            FROM activations WHERE otp_received_at IS NOT NULL
+            GROUP BY user_id,date(otp_received_at,'+7 hours')
+          ), latest_cycles AS (
+            SELECT d.* FROM activation_days d JOIN (
+              SELECT user_id,MAX(cycle_date) cycle_date FROM activation_days GROUP BY user_id
+            ) latest ON latest.user_id=d.user_id AND latest.cycle_date=d.cycle_date
+          )
           SELECT u.username,
             COUNT(CASE WHEN a.purchased_at >= datetime('now','start of month') THEN 1 END) monthly_purchased,
             COUNT(CASE WHEN a.otp_received_at IS NOT NULL AND strftime('%Y-%m',a.otp_received_at)=strftime('%Y-%m','now') THEN 1 END) monthly_success,
             COUNT(CASE WHEN a.otp_received_at IS NOT NULL AND date(a.otp_received_at,'+7 hours')=date('now','+7 hours') THEN 1 END) daily_success,
-            MIN(CASE WHEN a.otp_received_at IS NOT NULL AND date(a.otp_received_at,'+7 hours')=date('now','+7 hours') THEN datetime(a.otp_received_at,'+7 hours') END) first_success_today,
-            MAX(CASE WHEN a.otp_received_at IS NOT NULL AND date(a.otp_received_at,'+7 hours')=date('now','+7 hours') THEN datetime(a.otp_received_at,'+7 hours') END) last_success_today,
-            datetime(MIN(CASE WHEN a.otp_received_at IS NOT NULL AND date(a.otp_received_at,'+7 hours')=date('now','+7 hours') THEN a.otp_received_at END),'+7 hours','+1 day') estimated_24h_end,
+            lc.cycle_date latest_cycle_date,lc.cycle_success latest_cycle_success,
+            lc.first_success first_success_latest_cycle,
+            lc.last_success last_success_latest_cycle,
+            lc.estimated_24h_end,
             MAX(CASE WHEN a.otp_received_at IS NOT NULL THEN datetime(a.otp_received_at,'+7 hours') END) last_success
           FROM users u LEFT JOIN activations a ON a.user_id=u.id
-          WHERE u.active=1 GROUP BY u.id,u.username ORDER BY monthly_success DESC,u.username
+          LEFT JOIN latest_cycles lc ON lc.user_id=u.id
+          WHERE u.active=1 GROUP BY u.id,u.username,lc.cycle_date,lc.cycle_success,
+            lc.first_success,lc.last_success,lc.estimated_24h_end
+          ORDER BY monthly_success DESC,u.username
         `).all();
-        return json({ month: new Date().toISOString().slice(0, 7), timezone: "Asia/Bangkok", users: rows.results || [] });
+        return json({ month: new Date().toISOString().slice(0, 7), timezone: "Asia/Bangkok",
+          server_now_bangkok: new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " "),
+          users: rows.results || [] });
       }
       if (request.method === "GET" && path === "/admin/users") {
         if (user.role !== "admin") return json({ error: "ไม่มีสิทธิ์จัดการผู้ใช้" }, 403);
