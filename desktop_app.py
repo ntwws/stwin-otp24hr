@@ -24,7 +24,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.28"
+APP_VERSION = "1.0.30"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
 
 
@@ -593,6 +593,16 @@ class OrderListView(ctk.CTkFrame):
         self._selected = None
         self._row_widgets = {}
         self._render_job = None
+        # CTkFont construction is relatively expensive (it consults the
+        # scaling/font manager every time).  Rows are rebuilt when changing
+        # filters/pages, so reusing a handful of immutable font objects keeps
+        # those rebuilds responsive even with a full 25-row page.
+        self._font_header = ctk.CTkFont("Leelawadee UI", 13, "bold")
+        self._font_body = ctk.CTkFont("Segoe UI", 13)
+        self._font_body_bold = ctk.CTkFont("Segoe UI", 13, "bold")
+        self._font_status = ctk.CTkFont("Leelawadee UI", 12)
+        self._font_radio = ctk.CTkFont("Segoe UI Symbol", 18)
+        self._font_action = ctk.CTkFont("Leelawadee UI", 13, "bold")
         self.on_action = on_action
         self.on_more = on_more
         self.on_copy_number = on_copy_number
@@ -606,7 +616,7 @@ class OrderListView(ctk.CTkFrame):
         for column, text in ((1, "หมายเลข"), (2, "เวลา"), (3, "สถานะ"),
                              (4, "OTP"), (5, "การทำงาน")):
             ctk.CTkLabel(header, text=text, text_color="#c1c8dd",
-                         font=ctk.CTkFont("Leelawadee UI", 13, "bold")).grid(
+                         font=self._font_header).grid(
                              row=0, column=column, sticky="nsew", padx=5)
 
         self.body = ctk.CTkScrollableFrame(
@@ -687,7 +697,7 @@ class OrderListView(ctk.CTkFrame):
             ctk.CTkButton(bar, text=text, height=36, fg_color="transparent", hover_color=hover,
                           text_color=color, corner_radius=8, border_width=1 if name == "cancel" else 0,
                           border_color="#ef4653" if name == "cancel" else "#10172a",
-                          font=ctk.CTkFont("Leelawadee UI", 13, "bold"),
+                          font=self._font_action,
                           command=lambda n=name: self._action(iid, n)).grid(
                               row=0, column=index * 2, sticky="ew", padx=8, pady=6)
             if index < 3:
@@ -746,7 +756,7 @@ class OrderListView(ctk.CTkFrame):
                 row, text="●" if selected else "○", width=28, height=28,
                 fg_color="transparent", hover_color="#242d49",
                 text_color="#8b5cf6" if selected else "#9ba6c2",
-                font=ctk.CTkFont("Segoe UI Symbol", 18),
+                font=self._font_radio,
                 command=lambda value=iid: self._select(value))
             radio.grid(row=0, column=0, padx=(10, 2))
 
@@ -760,22 +770,22 @@ class OrderListView(ctk.CTkFrame):
                 height = 5 if y == 6 else (3 if y in (1, 12) else 2)
                 flag.create_rectangle(1, y, 23, y + height, fill=color, outline=color)
             phone_label = ctk.CTkLabel(number, text=str(phone), text_color="#f1f3f9",
-                                       font=ctk.CTkFont("Segoe UI", 13))
+                                       font=self._font_body)
             phone_label.pack(side="left", padx=(7, 0))
             phone_label.bind("<Button-1>", lambda _e, value=iid: self._copy_number(value))
 
             time_label = ctk.CTkLabel(row, text=str(remaining), text_color="#f1f3f9",
-                                      font=ctk.CTkFont("Segoe UI", 13))
+                                      font=self._font_body)
             time_label.grid(row=0, column=2)
             status_bg, status_fg = self._status_style(status)
             status_label = ctk.CTkLabel(row, text=str(status), fg_color=status_bg, text_color=status_fg,
                                         corner_radius=6, height=31,
-                                        font=ctk.CTkFont("Leelawadee UI", 12))
+                                        font=self._font_status)
             status_label.grid(row=0, column=3, padx=12)
             otp_box = ctk.CTkFrame(row, fg_color="transparent")
             otp_box.grid(row=0, column=4)
             code_label = ctk.CTkLabel(otp_box, text=str(code), text_color="#f1f3f9",
-                                      font=ctk.CTkFont("Segoe UI", 13, "bold"))
+                                      font=self._font_body_bold)
             code_label.pack(side="left")
             if code not in (None, "", "—"):
                 ctk.CTkButton(otp_box, text="▣", width=28, height=28, fg_color="#30235f",
@@ -901,6 +911,11 @@ class WebStyleApp(tk.Tk):
         self.orders = {}
         self.polling_ids = set()
         self.cloud_success_pending = set()
+        # Prevent overlapping wallet requests when several activations are
+        # completed in quick succession.  The API call is asynchronous; a
+        # small guard keeps the UI responsive and avoids stale responses
+        # racing each other and replacing the latest balance.
+        self._balance_refresh_pending = False
         self.credential_store = CredentialStore()
         self.saved_settings = self.credential_store.load()
         self.cloud = CloudClient(CLOUD_API_URL) if CLOUD_API_URL else None
@@ -929,6 +944,7 @@ class WebStyleApp(tk.Tk):
         self.update_manager = UpdateManager(APP_VERSION, UPDATE_MANIFEST_URL)
         self.update_checked = False
         self.poll_job = self.timer_job = None
+        self._save_orders_job = None
         self.data_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "HeroLineTH")
         self.orders_file = None
         self._build_ui()
@@ -1806,9 +1822,6 @@ class WebStyleApp(tk.Tk):
 
     def _show_admin_report(self):
         if not self.cloud or self.cloud_role != "admin": return
-        try: report = self.cloud.request("/admin/stats")
-        except Exception as exc:
-            messagebox.showerror("โหลดรายงานไม่สำเร็จ", str(exc), parent=self); return
         colors = self.palette
         window = tk.Toplevel(self); window.title("รายงานผู้ใช้ • OTP24HR")
         window.configure(bg=colors["window"]); window.resizable(False, False)
@@ -1824,26 +1837,30 @@ class WebStyleApp(tk.Tk):
         title_box = tk.Frame(header, bg=colors["window"]); title_box.pack(side="left")
         tk.Label(title_box, text="รายงานผู้ใช้", bg=colors["window"], fg=colors["text"],
                  font=("Segoe UI", 21, "bold")).pack(anchor="w")
-        tk.Label(title_box, text=f"สรุปประจำเดือน {report.get('month', '—')} • รอบ OTP ล่าสุดยังแสดงต่อหลังข้ามวัน",
-                 bg=colors["window"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
-        tk.Label(header, text="รายงานประจำเดือน", bg="#211943", fg="#bda4ff",
-                 font=("Segoe UI", 9, "bold"), padx=12, pady=7).pack(side="right")
+        subtitle_var = tk.StringVar(value="กำลังโหลดรายงาน…")
+        tk.Label(title_box, textvariable=subtitle_var, bg=colors["window"], fg=colors["muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+        month_nav = tk.Frame(header, bg=colors["window"]); month_nav.pack(side="right")
+        previous_btn = ttk.Button(month_nav, text="‹  เดือนก่อน", width=13)
+        previous_btn.pack(side="left")
+        month_var = tk.StringVar(value="—")
+        tk.Label(month_nav, textvariable=month_var, bg="#211943", fg="#d4c5ff",
+                 font=("Segoe UI", 10, "bold"), width=16, padx=10, pady=8).pack(side="left", padx=8)
+        next_btn = ttk.Button(month_nav, text="เดือนถัดไป  ›", width=13)
+        next_btn.pack(side="left")
 
-        users = list(report.get("users", []))
-        total_purchased = sum(int(row.get("monthly_purchased", 0)) for row in users)
-        total_success = sum(int(row.get("monthly_success", 0)) for row in users)
-        total_daily_success = sum(int(row.get("daily_success", 0)) for row in users)
         summary = tk.Frame(panel, bg=colors["window"]); summary.pack(fill="x", pady=(0, 14))
-        for index, (label, value, tone) in enumerate((("ผู้ใช้ทั้งหมด", f"{len(users):,} คน", colors["text"]),
-                                                       ("ซื้อทั้งหมด", f"{total_purchased:,} เบอร์", colors["text"]),
-                                                       ("OTP เดือนนี้", f"{total_success:,} เบอร์", colors["success"]),
-                                                       ("OTP วันนี้", f"{total_daily_success:,} เบอร์", "#bca4ff"))):
+        summary_vars = [tk.StringVar(value="—") for _ in range(4)]
+        for index, (label, value_var, tone) in enumerate((("ผู้ใช้ทั้งหมด", summary_vars[0], colors["text"]),
+                                                          ("ซื้อในเดือน", summary_vars[1], colors["text"]),
+                                                          ("OTP สำเร็จ", summary_vars[2], colors["success"]),
+                                                          ("อัตราสำเร็จ", summary_vars[3], "#bca4ff"))):
             box = tk.Frame(summary, bg=colors["panel"], padx=17, pady=13,
                            highlightthickness=1, highlightbackground=colors["border"])
             box.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 5, 0 if index == 3 else 5))
             tk.Label(box, text=label, bg=colors["panel"], fg=colors["muted"],
                      font=("Segoe UI", 9)).pack(anchor="w")
-            tk.Label(box, text=value, bg=colors["panel"], fg=tone,
+            tk.Label(box, textvariable=value_var, bg=colors["panel"], fg=tone,
                      font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(3, 0))
             summary.grid_columnconfigure(index, weight=1, uniform="summary")
 
@@ -1856,22 +1873,81 @@ class WebStyleApp(tk.Tk):
         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview,
                                   style="Dark.Vertical.TScrollbar")
         table.configure(yscrollcommand=scrollbar.set)
-        for column, title, size, stretch in (("user", "USERNAME", 150, True), ("purchased", "ซื้อเดือนนี้", 105, False),
-                                             ("success", "OTP เดือนนี้", 105, False), ("cycle", "รอบล่าสุด", 90, False),
+        for column, title, size, stretch in (("user", "USERNAME", 150, True), ("purchased", "ซื้อในเดือน", 105, False),
+                                             ("success", "OTP สำเร็จ", 105, False), ("cycle", "รอบล่าสุด", 90, False),
                                              ("first", "เวลาเริ่ม", 120, False), ("latest", "เวลาสิ้นสุด", 120, False)):
             table.heading(column, text=title)
             table.column(column, width=size, minwidth=90, anchor="center", stretch=stretch)
-        for row in users:
-            table.insert("", "end", values=(row.get("username", "—"), row.get("monthly_purchased", 0),
-                                             row.get("monthly_success", 0), self._short_date(row.get("latest_cycle_date")),
-                                             self._clock_text(row.get("first_success_latest_cycle")),
-                                             self._clock_text(row.get("last_success_latest_cycle"))))
         table.pack(side="left", fill="both", expand=True); scrollbar.pack(side="right", fill="y")
 
         footer = tk.Frame(panel, bg=colors["window"]); footer.pack(fill="x", pady=(14, 0))
-        tk.Label(footer, text=f"อัปเดตล่าสุด • {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-                 bg=colors["window"], fg=colors["muted"], font=("Segoe UI", 9)).pack(side="left")
+        updated_var = tk.StringVar(value="กำลังเชื่อมต่อ Cloudflare…")
+        tk.Label(footer, textvariable=updated_var, bg=colors["window"], fg=colors["muted"],
+                 font=("Segoe UI", 9)).pack(side="left")
         ttk.Button(footer, text="ปิดหน้าต่าง", command=window.destroy).pack(side="right")
+
+        thai_months = ("", "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+                       "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม")
+        current_month = datetime.now().strftime("%Y-%m")
+        state = {"month": current_month, "request": 0}
+
+        def month_label(value):
+            year, month = (int(part) for part in value.split("-"))
+            return f"{thai_months[month]} {year + 543}"
+
+        def shifted(value, delta):
+            year, month = (int(part) for part in value.split("-"))
+            index = year * 12 + month - 1 + delta
+            return f"{index // 12:04d}-{index % 12 + 1:02d}"
+
+        def apply_report(result):
+            report, error, request_id = result
+            if not window.winfo_exists() or request_id != state["request"]:
+                return
+            previous_btn.configure(state="normal")
+            next_btn.configure(state="normal" if state["month"] < current_month else "disabled")
+            if error:
+                updated_var.set(f"โหลดรายงานไม่สำเร็จ • {error}")
+                return
+            users = list(report.get("users", []))
+            selected = str(report.get("month") or state["month"])
+            state["month"] = selected
+            month_var.set(month_label(selected))
+            subtitle_var.set(f"สรุปประจำเดือน {selected} • รอบ OTP ล่าสุดยังแสดงต่อหลังข้ามวัน")
+            total_purchased = sum(int(row.get("monthly_purchased", 0)) for row in users)
+            total_success = sum(int(row.get("monthly_success", 0)) for row in users)
+            rate = (total_success * 100 / total_purchased) if total_purchased else 0
+            for variable, value in zip(summary_vars, (f"{len(users):,} คน", f"{total_purchased:,} เบอร์",
+                                                        f"{total_success:,} เบอร์", f"{rate:.1f}%")):
+                variable.set(value)
+            for item in table.get_children():
+                table.delete(item)
+            for row in users:
+                table.insert("", "end", values=(row.get("username", "—"), row.get("monthly_purchased", 0),
+                                                  row.get("monthly_success", 0), self._short_date(row.get("latest_cycle_date")),
+                                                  self._clock_text(row.get("first_success_latest_cycle")),
+                                                  self._clock_text(row.get("last_success_latest_cycle"))))
+            updated_var.set(f"อัปเดตล่าสุด • {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+
+        def load_month(value):
+            if value > current_month:
+                return
+            state["month"] = value; state["request"] += 1
+            request_id = state["request"]
+            month_var.set(month_label(value)); subtitle_var.set(f"กำลังโหลดรายงาน {value}…")
+            updated_var.set("กำลังดึงข้อมูลโดยไม่ทำให้หน้าต่างค้าง…")
+            previous_btn.configure(state="disabled"); next_btn.configure(state="disabled")
+            def work():
+                try:
+                    report = self.cloud.request("/admin/stats?" + urllib.parse.urlencode({"month": value}))
+                    return report, None, request_id
+                except Exception as exc:
+                    return None, str(exc), request_id
+            self._run(work, apply_report)
+
+        previous_btn.configure(command=lambda: load_month(shifted(state["month"], -1)))
+        next_btn.configure(command=lambda: load_month(shifted(state["month"], 1)))
+        load_month(current_month)
 
     def _show_create_user(self):
         if self.cloud_role != "admin":
@@ -2283,13 +2359,17 @@ class WebStyleApp(tk.Tk):
         threading.Thread(target=runner, daemon=True).start()
 
     def _drain_jobs(self):
+        processed = 0
         try:
-            while True:
+            while processed < 50:
                 fn, args = self.jobs.get_nowait(); fn(*args)
+                processed += 1
         except queue.Empty: pass
-        self.after(100, self._drain_jobs)
+        self.after(20 if processed else 60, self._drain_jobs)
 
     def _error(self, message):
+        # A failed balance refresh must not leave the guard latched forever.
+        self._balance_refresh_pending = False
         self.notice_var.set(message); self.notice.configure(fg="#b42318")
         self.buy_btn.configure(state="normal" if self.quote is not None else "disabled")
 
@@ -2315,6 +2395,18 @@ class WebStyleApp(tk.Tk):
             cloud_stats = f" • OTP สำเร็จเดือนนี้ {self.monthly_success} เบอร์" if self.cloud_user else ""
         self.notice_var.set(f"พร้อมใช้งาน • อัปเดต {datetime.now().strftime('%H:%M:%S')}{rate_text}{cloud_stats}")
         self.buy_btn.configure(state="normal" if self.quote is not None and stock else "disabled")
+
+    def _refresh_balance_only(self):
+        """Refresh just the wallet after an order is finished without reloading offers/FX."""
+        if self._balance_refresh_pending:
+            return
+        self._balance_refresh_pending = True
+        self._run(lambda: self._client().balance(), self._balance_refreshed)
+
+    def _balance_refreshed(self, balance):
+        self._balance_refresh_pending = False
+        self.balance_var.set(f"฿{balance*self.fx_rate:,.2f}" if self.fx_rate is not None else f"${balance:.4f}")
+        self.notice_var.set(f"เสร็จสิ้นแล้ว • อัปเดตยอดเงิน {datetime.now().strftime('%H:%M:%S')}")
 
     def buy(self):
         if self.quote is None: return
@@ -2524,6 +2616,7 @@ class WebStyleApp(tk.Tk):
                 self.polling_ids.discard(aid)
                 self._record_cloud_status(aid, "completed")
                 self._sync_row(aid)
+                self._refresh_balance_only()
             else:
                 self.orders[aid].update(status="ขอ OTP ซ้ำแล้ว • กำลังรอ SMS…", code="—", active=True,
                                         in_working=True, actionable=True, outcome="active")
@@ -2691,7 +2784,19 @@ class WebStyleApp(tk.Tk):
         entry.bind("<Return>", lambda _e: submit()); entry.focus_set(); self.wait_window(window)
         return result["value"]
 
-    def _save_orders(self):
+    def _save_orders(self, immediate=False):
+        if not self.orders_file: return
+        if immediate:
+            if self._save_orders_job:
+                try: self.after_cancel(self._save_orders_job)
+                except tk.TclError: pass
+                self._save_orders_job = None
+            self._write_orders()
+        elif self._save_orders_job is None:
+            self._save_orders_job = self.after(250, self._write_orders)
+
+    def _write_orders(self):
+        self._save_orders_job = None
         if not self.orders_file: return
         try:
             os.makedirs(os.path.dirname(self.orders_file), exist_ok=True)
@@ -2748,6 +2853,7 @@ class WebStyleApp(tk.Tk):
             return
 
     def _switch_user_orders(self, username):
+        self._save_orders(immediate=True)
         for job_name in ("poll_job", "timer_job"):
             job = getattr(self, job_name, None)
             if job:
@@ -2766,7 +2872,7 @@ class WebStyleApp(tk.Tk):
         self._load_orders()
 
     def _close(self):
-        self._save_orders()
+        self._save_orders(immediate=True)
         for job in (self.poll_job, self.timer_job):
             if job:
                 try: self.after_cancel(job)

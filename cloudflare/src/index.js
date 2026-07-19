@@ -151,9 +151,9 @@ export default {
           SELECT MAX(date(otp_received_at,'+7 hours')) cycle_date
           FROM user_activations WHERE otp_received_at IS NOT NULL
         ) SELECT
-          COUNT(CASE WHEN purchased_at>=datetime('now','start of month') THEN 1 END) monthly_purchased,
+          COUNT(CASE WHEN strftime('%Y-%m',purchased_at,'+7 hours')=strftime('%Y-%m','now','+7 hours') THEN 1 END) monthly_purchased,
           COUNT(CASE WHEN date(purchased_at,'+7 hours')=date('now','+7 hours') THEN 1 END) daily_purchased,
-          COUNT(CASE WHEN otp_received_at IS NOT NULL AND strftime('%Y-%m',otp_received_at)=strftime('%Y-%m','now') THEN 1 END) monthly_success,
+          COUNT(CASE WHEN otp_received_at IS NOT NULL AND strftime('%Y-%m',otp_received_at,'+7 hours')=strftime('%Y-%m','now','+7 hours') THEN 1 END) monthly_success,
           COUNT(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN 1 END) daily_success,
           MIN(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN datetime(otp_received_at,'+7 hours') END) first_success_today,
           MAX(CASE WHEN otp_received_at IS NOT NULL AND date(otp_received_at,'+7 hours')=date('now','+7 hours') THEN datetime(otp_received_at,'+7 hours') END) last_success_today,
@@ -196,6 +196,11 @@ export default {
       }
       if (request.method === "GET" && path === "/admin/stats") {
         if (user.role !== "admin") return json({ error: "ไม่มีสิทธิ์ดูรายงาน" }, 403);
+        const currentMonth = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 7);
+        const reportMonth = String(url.searchParams.get("month") || currentMonth);
+        if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(reportMonth) || reportMonth > currentMonth) {
+          return json({ error: "เดือนรายงานไม่ถูกต้อง" }, 400);
+        }
         const rows = await env.DB.prepare(`
           WITH activation_days AS (
             SELECT user_id,date(otp_received_at,'+7 hours') cycle_date,COUNT(*) cycle_success,
@@ -210,8 +215,8 @@ export default {
             ) latest ON latest.user_id=d.user_id AND latest.cycle_date=d.cycle_date
           )
           SELECT u.username,
-            COUNT(CASE WHEN a.purchased_at >= datetime('now','start of month') THEN 1 END) monthly_purchased,
-            COUNT(CASE WHEN a.otp_received_at IS NOT NULL AND strftime('%Y-%m',a.otp_received_at)=strftime('%Y-%m','now') THEN 1 END) monthly_success,
+            COUNT(CASE WHEN strftime('%Y-%m',a.purchased_at,'+7 hours')=?1 THEN 1 END) monthly_purchased,
+            COUNT(CASE WHEN a.otp_received_at IS NOT NULL AND strftime('%Y-%m',a.otp_received_at,'+7 hours')=?1 THEN 1 END) monthly_success,
             COUNT(CASE WHEN a.otp_received_at IS NOT NULL AND date(a.otp_received_at,'+7 hours')=date('now','+7 hours') THEN 1 END) daily_success,
             lc.cycle_date latest_cycle_date,lc.cycle_success latest_cycle_success,
             lc.first_success first_success_latest_cycle,
@@ -223,8 +228,8 @@ export default {
           WHERE u.active=1 GROUP BY u.id,u.username,lc.cycle_date,lc.cycle_success,
             lc.first_success,lc.last_success,lc.estimated_24h_end
           ORDER BY monthly_success DESC,u.username
-        `).all();
-        return json({ month: new Date().toISOString().slice(0, 7), timezone: "Asia/Bangkok",
+        `).bind(reportMonth).all();
+        return json({ month: reportMonth, timezone: "Asia/Bangkok",
           server_now_bangkok: new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " "),
           users: rows.results || [] });
       }
@@ -232,7 +237,7 @@ export default {
         if (user.role !== "admin") return json({ error: "ไม่มีสิทธิ์จัดการผู้ใช้" }, 403);
         const rows = await env.DB.prepare(`SELECT u.id,u.username,u.role,u.daily_limit,u.created_at,
           COUNT(CASE WHEN date(a.purchased_at,'+7 hours')=date('now','+7 hours') THEN 1 END) purchased_today,
-          COUNT(CASE WHEN a.purchased_at>=datetime('now','start of month') THEN 1 END) purchased_month
+          COUNT(CASE WHEN strftime('%Y-%m',a.purchased_at,'+7 hours')=strftime('%Y-%m','now','+7 hours') THEN 1 END) purchased_month
           FROM users u LEFT JOIN activations a ON a.user_id=u.id
           WHERE u.active=1 GROUP BY u.id,u.username,u.role,u.daily_limit,u.created_at
           ORDER BY CASE WHEN u.role='admin' THEN 0 ELSE 1 END,u.username COLLATE NOCASE`).all();
