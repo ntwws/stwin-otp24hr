@@ -25,7 +25,11 @@ class UpdateManager:
         self.manifest_url = manifest_url
 
     def check(self):
-        request = urllib.request.Request(self.manifest_url, headers={"User-Agent": "OTP24HR-Updater/1.0", "Cache-Control": "no-cache"})
+        request = urllib.request.Request(self.manifest_url, headers={
+            "User-Agent": "OTP24HR-Updater/1.0",
+            "Cache-Control": "no-cache",
+            "Accept": "application/vnd.github.raw+json",
+        })
         with urllib.request.urlopen(request, timeout=20) as response:
             manifest = json.loads(response.read().decode("utf-8"))
         for key in ("version", "download_url", "sha256"):

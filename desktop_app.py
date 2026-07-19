@@ -24,8 +24,8 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.31"
-UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ntwws/stwin-otp24hr/main/update.json"
+APP_VERSION = "1.0.32"
+UPDATE_MANIFEST_URL = "https://api.github.com/repos/ntwws/stwin-otp24hr/contents/update.json?ref=main"
 
 
 def resource_path(filename: str) -> str:
