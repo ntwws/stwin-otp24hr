@@ -34,14 +34,18 @@ class UpdateManager:
         manifest["available"] = version_tuple(manifest["version"]) > version_tuple(self.current_version)
         return manifest
 
-    def download_verified(self, manifest, progress=None):
+    def download_verified(self, manifest, progress=None, _allow_manifest_retry=True):
         folder = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "OTP24HR" / "updates"
         folder.mkdir(parents=True, exist_ok=True)
         package_type = str(manifest.get("package_type", "")).lower()
         url_suffix = Path(urllib.parse.urlparse(manifest["download_url"]).path).suffix.lower()
         suffix = ".zip" if package_type == "zip" or url_suffix == ".zip" else ".exe"
         target = folder / f"OTP24HR-{manifest['version']}{suffix}"
-        request = urllib.request.Request(manifest["download_url"], headers={"User-Agent": "OTP24HR-Updater/1.0"})
+        # Include the expected digest in the URL so a CDN cannot serve a stale
+        # asset after a release file has been replaced under the same name.
+        separator = "&" if "?" in manifest["download_url"] else "?"
+        download_url = f"{manifest['download_url']}{separator}sha256={str(manifest['sha256']).strip().lower()}"
+        request = urllib.request.Request(download_url, headers={"User-Agent": "OTP24HR-Updater/1.0", "Cache-Control": "no-cache"})
         digest = hashlib.sha256()
         with urllib.request.urlopen(request, timeout=60) as response, open(target, "wb") as stream:
             total = int(response.headers.get("Content-Length", "0")); received = 0
@@ -54,6 +58,14 @@ class UpdateManager:
         if actual != expected:
             try: target.unlink()
             except OSError: pass
+            # A release workflow may replace an asset moments after the update
+            # dialog was opened. Fetch the latest manifest once and transparently
+            # retry when its digest changed, instead of making the user reopen it.
+            if _allow_manifest_retry:
+                refreshed = self.check()
+                refreshed_digest = str(refreshed.get("sha256", "")).strip().lower()
+                if refreshed.get("version") == manifest.get("version") and refreshed_digest != expected:
+                    return self.download_verified(refreshed, progress, False)
             raise ValueError("SHA-256 ของไฟล์อัปเดตไม่ตรงกัน")
         return str(target)
 
