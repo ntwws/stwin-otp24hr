@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import sys
@@ -24,7 +25,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.32"
+APP_VERSION = "1.0.33"
 UPDATE_MANIFEST_URL = "https://api.github.com/repos/ntwws/stwin-otp24hr/contents/update.json?ref=main"
 
 
@@ -134,9 +135,73 @@ class CloudClient:
 
 def _is_positive_number(value):
     try:
-        return float(value) > 0
+        return math.isfinite(float(value)) and float(value) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _offer_rows(value, inherited_price=None, depth=0):
+    """Extract (price, stock) rows from HeroSMS price responses.
+
+    HeroSMS-compatible endpoints have returned both ``price: count`` maps and
+    lists/envelopes containing ``cost``/``count`` fields.  Keep this parser
+    deliberately conservative: only numeric price keys or explicit price
+    fields are accepted, and malformed values are ignored rather than making
+    the refresh screen fail.
+    """
+    if depth > 7 or value is None:
+        return []
+    rows = []
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            rows.extend(_offer_rows(item, inherited_price, depth + 1))
+        return rows
+    if not isinstance(value, dict):
+        if inherited_price is not None and _is_positive_number(inherited_price):
+            try:
+                count = int(float(value))
+                if count > 0:
+                    rows.append((float(inherited_price), count))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return rows
+
+    price_value = next((value.get(key) for key in ("price", "cost", "salePrice", "sale_price")
+                        if value.get(key) is not None), inherited_price)
+    count_value = next((value.get(key) for key in ("count", "cnt", "quantity", "stock", "available")
+                        if value.get(key) is not None), None)
+    if price_value is not None and count_value is not None and _is_positive_number(price_value):
+        try:
+            count = int(float(count_value))
+            if count > 0:
+                rows.append((float(price_value), count))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    for key, child in value.items():
+        if _is_positive_number(key):
+            if isinstance(child, dict):
+                # A numeric key is the price in a price-map response.
+                direct_count = next((child.get(k) for k in ("count", "cnt", "quantity", "stock", "available")
+                                     if child.get(k) is not None), None)
+                if direct_count is not None:
+                    try:
+                        count = int(float(direct_count))
+                        if count > 0:
+                            rows.append((float(key), count))
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                else:
+                    rows.extend(_offer_rows(child, float(key), depth + 1))
+            else:
+                try:
+                    count = int(float(child))
+                    if count > 0:
+                        rows.append((float(key), count))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        elif isinstance(child, (dict, list, tuple)):
+            rows.extend(_offer_rows(child, inherited_price, depth + 1))
+    return rows
 
 
 class HeroClient:
@@ -198,39 +263,53 @@ class HeroClient:
 
     def offers(self):
         """Return selectable price tiers as [(price, count)], cheapest first."""
+        # HeroSMS moved the website-style tier list to the v1 Offers API.
+        # Cloudflare proxies it so the API key is never distributed to users.
+        try:
+            if self.cloud:
+                data = self.cloud.request("/hero/offers")
+            else:
+                query = urllib.parse.urlencode({"services": SERVICE, "countries": COUNTRY})
+                req = urllib.request.Request(
+                    f"https://hero-sms.com/api/v1/activations/offers?{query}",
+                    headers={"Authorization": f"ApiKey {self.api_key}",
+                             "Accept": "application/json",
+                             "User-Agent": "OTP24HR-Windows/3.0"})
+                with urllib.request.urlopen(req, timeout=20) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            entry = data.get("data", {}).get(SERVICE, {}).get(str(COUNTRY), {})
+            rows = _offer_rows(entry.get("map", {})) if isinstance(entry, dict) else []
+            if rows:
+                return sorted(set(rows))
+        except (HeroError, urllib.error.URLError, TimeoutError, ValueError, TypeError, json.JSONDecodeError):
+            # Keep compatibility with installations whose Cloudflare Worker
+            # has not been upgraded yet, then fall back to the basic price.
+            pass
         for action in ("getPricesExtended", "getFreePrices", "getPricesV2"):
             try:
                 data = self.request(action, country=COUNTRY, service=SERVICE,
                                     freePrice="true")
                 root = data.get("data", data) if isinstance(data, dict) else {}
                 entry = root.get(str(COUNTRY), {}).get(SERVICE, {}) if isinstance(root, dict) else {}
-                price_map = {}
-                if isinstance(entry, dict):
-                    price_map = (entry.get("freePriceMap") or entry.get("prices") or
-                                 entry.get("priceMap") or entry.get("price_map") or {})
-                    if not price_map:
-                        numeric_keys = {k: v for k, v in entry.items()
-                                        if _is_positive_number(k)}
-                        price_map = numeric_keys
-                rows = []
-                for price, value in price_map.items():
-                    count = value.get("count", value.get("cnt", value.get("quantity", 0))) if isinstance(value, dict) else value
-                    if float(price) > 0 and int(count) > 0:
-                        rows.append((float(price), int(count)))
+                # Parse the requested country/service first; if a provider
+                # wraps it in another envelope, the generic parser still
+                # handles maps, objects, and lists safely.
+                rows = _offer_rows(entry)
                 if rows:
-                    return sorted(rows)
+                    return sorted(set(rows))
                 if isinstance(entry, dict) and entry.get("cost") is not None:
-                    count = int(entry.get("count", entry.get("cnt", 0)))
-                    if count > 0:
-                        return [(float(entry["cost"]), count)]
+                    rows = _offer_rows(entry)
+                    if rows:
+                        return sorted(set(rows))
             except HeroError as exc:
                 message = str(exc)
                 if "BAD_ACTION" not in message and "BAD_REQUEST" not in message and "Method Not Found" not in message:
                     raise
         data = self.request("getPrices", country=COUNTRY, service=SERVICE)
         entry = data.get(str(COUNTRY), {}).get(SERVICE, {}) if isinstance(data, dict) else {}
-        if isinstance(entry, dict) and entry.get("cost") is not None and int(entry.get("count", 0)) > 0:
-            return [(float(entry["cost"]), int(entry["count"]))]
+        rows = _offer_rows(entry)
+        if rows:
+            return sorted(set(rows))
         return []
 
     @staticmethod
@@ -249,12 +328,16 @@ class HeroClient:
                          if abs(price - accepted_price) <= 1e-9), None)
         if selected is None or selected[1] < 1:
             raise HeroError(ERRORS["NO_NUMBERS"])
+        # Use the canonical tier value returned by the latest quote.  This
+        # avoids passing a stale UI float (or an over-precise representation)
+        # to HeroSMS while still respecting the selected maximum price.
+        selected_price = selected[0]
         result = self.request("getNumber", country=COUNTRY, service=SERVICE,
-                              maxPrice=accepted_price)
+                              maxPrice=selected_price)
         if not isinstance(result, str) or not result.startswith("ACCESS_NUMBER:"):
             raise HeroError(ERRORS.get(str(result).split(":", 1)[0], str(result)))
         _, activation_id, phone = result.split(":", 2)
-        return activation_id, phone, accepted_price
+        return activation_id, phone, selected_price
 
 
 class App(tk.Tk):
@@ -1291,6 +1374,15 @@ class WebStyleApp(tk.Tk):
                      font=ctk.CTkFont("Segoe UI", 21, "bold")).pack(side="left")
         ctk.CTkLabel(price_line, textvariable=self.stock_var, text_color="#77819d",
                      font=ctk.CTkFont("Leelawadee UI", 10)).pack(side="left", padx=(12, 0), pady=(5, 0))
+        # Offers are selectable from a compact popup so the main layout stays
+        # uncluttered.  The button is disabled until a price list is loaded.
+        self.offer_select_btn = ctk.CTkButton(
+            price_line, text="⌄", width=28, height=28, corner_radius=6,
+            fg_color="#21183f", hover_color="#302257", text_color="#c8b5ff",
+            border_width=1, border_color="#6545a7",
+            font=ctk.CTkFont("Segoe UI", 15, "bold"),
+            command=self._show_offer_picker, state="disabled")
+        self.offer_select_btn.pack(side="left", padx=(8, 0))
         self.refresh_btn = ctk.CTkButton(balance, text="↻  อัปเดตราคา", width=118, height=40,
                                          fg_color="#21183f", hover_color="#302257", text_color="#c8b5ff",
                                          border_width=1, border_color="#6545a7", corner_radius=7,
@@ -2382,7 +2474,7 @@ class WebStyleApp(tk.Tk):
     def _refreshed(self, result):
         offers, balance, (rate, rate_date) = result
         self.quote = offers[0][0] if offers else None; self.fx_rate = rate; self.offer_rows = offers
-        stock = sum(x[1] for x in offers)
+        stock = offers[0][1] if offers else 0
         if self.quote is None: self.price_var.set("ไม่มีสินค้า")
         elif rate is None: self.price_var.set(f"${self.quote:.4f}")
         else: self.price_var.set(f"฿{self.quote*rate:.2f}")
@@ -2395,6 +2487,79 @@ class WebStyleApp(tk.Tk):
             cloud_stats = f" • OTP สำเร็จเดือนนี้ {self.monthly_success} เบอร์" if self.cloud_user else ""
         self.notice_var.set(f"พร้อมใช้งาน • อัปเดต {datetime.now().strftime('%H:%M:%S')}{rate_text}{cloud_stats}")
         self.buy_btn.configure(state="normal" if self.quote is not None and stock else "disabled")
+        if hasattr(self, "offer_select_btn"):
+            self.offer_select_btn.configure(state="normal" if offers else "disabled")
+        self._refresh_offer_picker()
+
+    def _show_offer_picker(self):
+        """Show all HeroSMS price tiers in a compact, scrollable picker."""
+        if not self.offer_rows:
+            return
+        existing = getattr(self, "_offer_picker", None)
+        if existing is not None and existing.winfo_exists():
+            existing.focus_force(); return
+        popup = ctk.CTkToplevel(self)
+        self._offer_picker = popup
+        popup.title("เลือกราคา/เบอร์")
+        popup.transient(self); popup.resizable(False, False)
+        popup.configure(fg_color="#0b1020")
+        shell = ctk.CTkFrame(popup, fg_color="#100b20", corner_radius=10,
+                             border_width=1, border_color="#6545a7")
+        shell.pack(fill="both", expand=True, padx=8, pady=8)
+        ctk.CTkLabel(shell, text="เลือกราคาหมายเลข", text_color="#f5f3ff", anchor="w",
+                     font=ctk.CTkFont("Leelawadee UI", 17, "bold")).pack(fill="x", padx=18, pady=(16, 0))
+        ctk.CTkLabel(shell, text="Offers • LINE ประเทศไทย • 20 นาที", text_color="#aeb7cf", anchor="w",
+                     font=ctk.CTkFont("Leelawadee UI", 10)).pack(fill="x", padx=18, pady=(2, 10))
+        rows = ctk.CTkScrollableFrame(shell, width=370, height=330, fg_color="#0b1120",
+                                      corner_radius=8, scrollbar_button_color="#4c3a78",
+                                      scrollbar_button_hover_color="#6d4caf")
+        rows.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        # Match the website: higher-priced tiers appear first while the current
+        # selection remains visibly highlighted.
+        for price, stock in sorted(self.offer_rows, key=lambda item: item[0], reverse=True):
+            selected = self.quote is not None and abs(price - self.quote) <= 1e-9
+            thb = "ยังไม่มีเรต THB" if self.fx_rate is None else f"฿{price * self.fx_rate:.2f}"
+            marker = "●" if selected else "○"
+            text = f"{marker}   ${price:.4f}     {thb}     {stock:,} เบอร์"
+            ctk.CTkButton(rows, text=text, anchor="w", height=43, corner_radius=6,
+                          fg_color="#31205f" if selected else "transparent",
+                          hover_color="#382568", text_color="#ffffff" if selected else "#dce1ef",
+                          border_width=1, border_color="#7c3aed" if selected else "#242d49",
+                          font=ctk.CTkFont("Segoe UI", 12, "bold" if selected else "normal"),
+                          command=lambda value=price: self._choose_offer(value)).pack(fill="x", pady=2)
+        ctk.CTkLabel(shell, text="ระบบจะใช้ราคาที่เลือกเป็นราคาสูงสุดในการซื้อ",
+                     text_color="#8791aa", font=ctk.CTkFont("Leelawadee UI", 9)).pack(pady=(0, 10))
+        popup.protocol("WM_DELETE_WINDOW", lambda: self._close_offer_picker())
+        popup.bind("<Escape>", lambda _e: self._close_offer_picker())
+        popup.update_idletasks()
+        x = self.offer_select_btn.winfo_rootx()
+        y = self.offer_select_btn.winfo_rooty() + self.offer_select_btn.winfo_height() + 4
+        width, height = 430, 500
+        x = min(x, max(0, popup.winfo_screenwidth() - width - 12))
+        y = min(y, max(0, popup.winfo_screenheight() - height - 48))
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        popup.focus_force()
+
+    def _choose_offer(self, price):
+        self.quote = float(price)
+        self.price_var.set(f"${self.quote:.4f}" if self.fx_rate is None
+                           else f"฿{self.quote * self.fx_rate:.2f}")
+        selected = next(((row_price, stock) for row_price, stock in self.offer_rows
+                         if abs(row_price - self.quote) <= 1e-9), None)
+        if selected:
+            self.stock_var.set(f"คงเหลือ {selected[1]:,} เบอร์")
+        self._close_offer_picker()
+        self.buy_btn.configure(state="normal")
+
+    def _close_offer_picker(self):
+        popup = getattr(self, "_offer_picker", None)
+        if popup is not None and popup.winfo_exists():
+            popup.destroy()
+        self._offer_picker = None
+
+    def _refresh_offer_picker(self):
+        # A refresh replaces offers; close an open picker to avoid stale rows.
+        self._close_offer_picker()
 
     def _refresh_balance_only(self):
         """Refresh just the wallet after an order is finished without reloading offers/FX."""

@@ -65,8 +65,39 @@ async function queue(env, payload) {
   return env.PURCHASE_QUEUE.get(id).fetch("https://queue/", { method: "POST", body: JSON.stringify(payload) });
 }
 async function heroRequest(env, action, params = {}) {
+  // Never allow caller-supplied params to overwrite the protected API key or
+  // action.  Without this check a permitted action (for example getBalance)
+  // could be used to proxy arbitrary HeroSMS actions.
+  const allowedParams = {
+    getBalance: [],
+    getPrices: ["country", "service"],
+    getPricesExtended: ["country", "service", "freePrice"],
+    getFreePrices: ["country", "service", "freePrice"],
+    getPricesV2: ["country", "service", "freePrice"],
+    getNumber: ["country", "service", "maxPrice"],
+    getStatus: ["id"],
+    setStatus: ["id", "status"]
+  };
+  if (!Object.prototype.hasOwnProperty.call(allowedParams, action) ||
+      !params || typeof params !== "object" || Array.isArray(params)) {
+    return json({ error: "invalid HeroSMS parameters" }, 400);
+  }
+  const allowed = new Set(allowedParams[action]);
+  for (const key of Object.keys(params)) {
+    if (!allowed.has(key)) return json({ error: `unsupported HeroSMS parameter: ${key}` }, 400);
+  }
+  if (action === "getNumber") {
+    const maxPrice = Number(params.maxPrice);
+    // Keep a server-side ceiling even if a modified client sends an excessive
+    // maxPrice.  Raise it explicitly with HERO_MAX_PRICE when needed.
+    const ceiling = Number(env.HERO_MAX_PRICE || 10);
+    if (!Number.isFinite(maxPrice) || maxPrice <= 0 ||
+        !Number.isFinite(ceiling) || maxPrice > ceiling) {
+      return json({ error: "invalid or excessive maxPrice" }, 400);
+    }
+  }
   const query = new URLSearchParams({ api_key: env.HERO_API_KEY, action });
-  for (const [key, value] of Object.entries(params || {})) {
+  for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) query.set(key, String(value));
   }
   const response = await fetch(`https://hero-sms.com/stubs/handler_api.php?${query}`, {
@@ -75,6 +106,25 @@ async function heroRequest(env, action, params = {}) {
   const raw = await response.text();
   if (!response.ok) return json({ error: raw || `HeroSMS HTTP ${response.status}` }, 502);
   return json({ raw });
+}
+
+async function heroOffers(env) {
+  const query = new URLSearchParams({ services: "me", countries: "52" });
+  const url = `https://hero-sms.com/api/v1/activations/offers?${query}`;
+  const headers = { accept: "application/json", "user-agent": "OTP24HR-Cloudflare/3.0" };
+  // HeroSMS v1 documents the header as: Authorization: ApiKey {token}.
+  // The Worker adds the scheme so the secret never reaches desktop clients.
+  const response = await fetch(url, {
+    headers: { ...headers, authorization: `ApiKey ${env.HERO_API_KEY}` }
+  });
+  const raw = await response.text();
+  if (!response.ok) {
+    let detail = raw;
+    try { detail = JSON.parse(raw)?.message || JSON.parse(raw)?.error || raw; } catch {}
+    return json({ error: detail || `HeroSMS offers HTTP ${response.status}` }, 502);
+  }
+  try { return json(JSON.parse(raw)); }
+  catch { return json({ error: "HeroSMS offers returned invalid JSON" }, 502); }
 }
 
 export default {
@@ -108,6 +158,8 @@ export default {
       }
       const user = await authenticate(request, env);
       if (!user) return json({ error: "กรุณาเข้าสู่ระบบใหม่" }, 401);
+
+      if (request.method === "GET" && path === "/hero/offers") return heroOffers(env);
 
       if (path === "/queue/status") return queue(env, { action: "status" });
       if (request.method === "POST" && path === "/queue/acquire") {
