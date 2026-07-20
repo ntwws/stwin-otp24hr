@@ -74,7 +74,7 @@ async function heroRequest(env, action, params = {}) {
     getPricesExtended: ["country", "service", "freePrice"],
     getFreePrices: ["country", "service", "freePrice"],
     getPricesV2: ["country", "service", "freePrice"],
-    getNumber: ["country", "service", "maxPrice"],
+    getNumber: ["country", "service", "maxPrice", "fixedPrice"],
     getStatus: ["id"],
     setStatus: ["id", "status"]
   };
@@ -94,6 +94,11 @@ async function heroRequest(env, action, params = {}) {
     if (!Number.isFinite(maxPrice) || maxPrice <= 0 ||
         !Number.isFinite(ceiling) || maxPrice > ceiling) {
       return json({ error: "invalid or excessive maxPrice" }, 400);
+    }
+    // maxPrice alone is only a ceiling and HeroSMS may return a cheaper tier.
+    // Require an exact-price purchase so the charged tier matches the UI.
+    if (String(params.fixedPrice).toLowerCase() !== "true") {
+      return json({ error: "fixedPrice must be true" }, 400);
     }
   }
   const query = new URLSearchParams({ api_key: env.HERO_API_KEY, action });

@@ -25,7 +25,7 @@ COUNTRY = 52
 SERVICE = "me"
 POLL_MS = 5000
 FX_URL = "https://api.frankfurter.dev/v2/rate/USD/THB?providers=BOT"
-APP_VERSION = "1.0.33"
+APP_VERSION = "1.0.34"
 UPDATE_MANIFEST_URL = "https://api.github.com/repos/ntwws/stwin-otp24hr/contents/update.json?ref=main"
 
 
@@ -328,12 +328,12 @@ class HeroClient:
                          if abs(price - accepted_price) <= 1e-9), None)
         if selected is None or selected[1] < 1:
             raise HeroError(ERRORS["NO_NUMBERS"])
-        # Use the canonical tier value returned by the latest quote.  This
-        # avoids passing a stale UI float (or an over-precise representation)
-        # to HeroSMS while still respecting the selected maximum price.
+        # Use the canonical tier value returned by the latest quote.  HeroSMS
+        # treats maxPrice as a ceiling by default, which can silently return a
+        # cheaper tier.  fixedPrice is required to buy the selected tier.
         selected_price = selected[0]
         result = self.request("getNumber", country=COUNTRY, service=SERVICE,
-                              maxPrice=selected_price)
+                              maxPrice=selected_price, fixedPrice="true")
         if not isinstance(result, str) or not result.startswith("ACCESS_NUMBER:"):
             raise HeroError(ERRORS.get(str(result).split(":", 1)[0], str(result)))
         _, activation_id, phone = result.split(":", 2)
