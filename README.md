@@ -1,2 +1,9 @@
-# stwin-otp24hr
-Signed OTP24HR desktop updates only - no source code
+# OTP24HR Updates
+
+คลังนี้ใช้เผยแพร่โปรแกรม OTP24HR สำหรับ Windows เท่านั้น และไม่มีซอร์สโค้ดของระบบ
+
+- ดาวน์โหลดล่าสุด: [OTP24HR-portable.zip](./OTP24HR-portable.zip)
+- ข้อมูลเวอร์ชันและ SHA-256: [update.json](./update.json)
+- โปรแกรมตรวจสอบลายเซ็น Ed25519 และ SHA-256 อัตโนมัติก่อนติดตั้งทุกครั้ง
+
+หากต้องการความช่วยเหลือ โปรดติดต่อผู้ดูแลผ่าน [LINE](https://lin.ee/7La1Hpu)
