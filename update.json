@@ -1,9 +1,9 @@
 {
-  "version": "1.0.121",
+  "version": "1.0.122",
   "download_url": "https://github.com/ntwws/stwin-otp24hr/raw/main/OTP24HR-portable.zip",
-  "sha256": "448c64f2e97f37e580df237aa627a7baa15825757c7e06182c80abe4a50bcc60",
+  "sha256": "f87626f61896993298dda680817d2b91f68b375b6e135eaccab0624443a301e2",
   "package_type": "zip",
   "notes": "Signed portable folder build",
   "signing_algorithm": "Ed25519",
-  "signature": "HMjuwuFgupdP83JzlPoNisbvWXrE5sVqwOagdYnfl226FLWj8DmKdKffzlzEk29acuKsFpkiZxM0pRSQBThnBw=="
+  "signature": "J+Z9YMa+QSaXPajdFdNJPjbM8NOxEBavLH2k2oiCc9y/x6B9u5QjEMLGDnKW+Y7FuLWNxTu7Bg7Vq89I0uvFAQ=="
 }
